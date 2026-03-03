@@ -1,0 +1,120 @@
+# Architecture:
+# - Frontend (nginx) serves the web UI and proxies /api/* to the backend container
+# - Backend runs on container port 8000 (published to host via BACKEND_PORT)
+# - Frontend runs on container port 8080 (published to host via FRONTEND_PORT)
+#
+# Two supported deployment modes:
+# - Direct Docker exposure (simple): set FRONTEND_PORT=80 and (optionally) expose BACKEND_PORT=8000
+# - Production behind host Nginx (recommended): set FRONTEND_PORT=8081 BACKEND_PORT=8001 and only expose 80/443 via Nginx
+
+# Build optimizations:
+# - BuildKit REQUIRED for cache mounts (default in Docker 23.0+)
+# - To build: DOCKER_BUILDKIT=1 docker-compose build
+# - For faster builds: DOCKER_BUILDKIT=1 docker-compose build --parallel
+# - Clean build: DOCKER_BUILDKIT=1 docker-compose build --no-cache
+#
+# Performance tips:
+# - Cache mounts dramatically speed up rebuilds (pip, npm)
+# - Multi-stage builds minimize final image size
+# - Debian Slim (backend) balances size with Python wheel compatibility
+# - Alpine (frontend) keeps the web server minimal
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: tokemizer-backend
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    environment:
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - OPTIMIZER_CACHE_SIZE=${OPTIMIZER_CACHE_SIZE:-256}
+      - DB_PATH=${DB_PATH:-/app/data/app.db}
+      - UVICORN_WORKERS=${UVICORN_WORKERS:-1}
+      - APP_ENV=${TOKEMIZER_DEPLOY_TARGET:-production}
+      - HF_HOME=/app/.cache/huggingface
+      - HF_HUB_CACHE=/app/.cache/huggingface/hub
+      - SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface/sentence-transformers
+      - SPACY_HOME=/app/.cache/huggingface/spacy
+      - PROMPT_OPTIMIZER_SPACY_MODEL_PATH=/app/.cache/huggingface/spacy/en_core_web_sm
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HUGGINGFACE_HUB_TOKEN=${HUGGINGFACE_HUB_TOKEN:-}
+      - HUGGINGFACE_TOKEN=${HUGGINGFACE_TOKEN:-}
+      - HF_API_TOKEN=${HF_API_TOKEN:-}
+    volumes:
+      - ${TOKEMIZER_BACKEND_DATA_PATH:-backend-data}:/app/data
+      - ${TOKEMIZER_MODEL_CACHE_PATH:-model-cache}:/app/.cache/huggingface
+    networks:
+      - tokemizer-net
+    restart: ${TOKEMIZER_RESTART_POLICY:-unless-stopped}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Resource limits to prevent ML models from consuming excessive resources
+    deploy:
+      resources:
+        limits:
+          memory: ${BACKEND_MEMORY_LIMIT:-12G} # Increase for 200k token prompts
+          cpus: ${BACKEND_CPU_LIMIT:-2.0} # Override for multi-core hosts
+        reservations:
+          memory: ${BACKEND_MEMORY_RESERVATION:-8G} # Minimum guaranteed memory
+          cpus: ${BACKEND_CPU_RESERVATION:-1.0}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:8000/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 240s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        BACKEND_PROXY_TIMEOUT: ${BACKEND_PROXY_TIMEOUT:-900s}
+        MODEL_UPLOAD_MAX_BODY: ${MODEL_UPLOAD_MAX_BODY:-512m}
+    container_name: tokemizer-frontend
+    ports:
+      - "${FRONTEND_PORT:-80}:8080" # Map configurable host port to container port 8080 (unprivileged)
+    environment:
+      - BACKEND_PROXY_TIMEOUT=${BACKEND_PROXY_TIMEOUT:-900s}
+      - MODEL_UPLOAD_MAX_BODY=${MODEL_UPLOAD_MAX_BODY:-512m}
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - tokemizer-net
+    restart: ${TOKEMIZER_RESTART_POLICY:-unless-stopped}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    # Resource limits for frontend (nginx is lightweight)
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+          cpus: '0.25'
+    healthcheck:
+      test: [ "CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:8080/health" ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+networks:
+  tokemizer-net:
+    driver: bridge
+
+volumes:
+  backend-data:
+    driver: local
+  model-cache:
+    driver: local

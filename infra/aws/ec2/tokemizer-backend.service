@@ -1,0 +1,24 @@
+[Unit]
+Description=Tokemizer Backend API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tokemizer
+Group=tokemizer
+WorkingDirectory=/opt/tokemizer/app/backend
+EnvironmentFile=/data/tokemizer/env/backend.env
+ExecStart=/opt/tokemizer/venv/bin/python run_uvicorn.py
+Restart=always
+RestartSec=5
+TimeoutStopSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/data/tokemizer /opt/tokemizer/app/backend/vendor/tiktoken
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

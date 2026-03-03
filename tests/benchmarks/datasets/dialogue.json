@@ -1,0 +1,31 @@
+{
+    "name": "Dialogue Prompts Benchmark Dataset",
+    "description": "Sample dialogue/conversation prompts for benchmarking",
+    "version": "1.0.0",
+    "samples": [
+        {
+            "text": "User: Hello, how are you today?\nAssistant: I'm doing well, thank you for asking! How can I help you today?",
+            "expected_type": "dialogue",
+            "metadata": {
+                "turns": 2,
+                "size": "small"
+            }
+        },
+        {
+            "text": "Human: I need help with my Python code. I'm getting an error.\nAI: I'd be happy to help! Could you please share the error message and the relevant code?\nHuman: Here's the error: TypeError: 'NoneType' object is not iterable\nAI: This error typically occurs when you're trying to iterate over a variable that is None. Could you show me the line where this error occurs?\nHuman: It's in this function: def process(data): for item in data: print(item)\nAI: I see the issue. The 'data' parameter is None when passed to this function. You should add a check at the beginning of the function.",
+            "expected_type": "dialogue",
+            "metadata": {
+                "turns": 6,
+                "size": "medium"
+            }
+        },
+        {
+            "text": "System: You are a helpful customer service agent for TechCorp.\nUser: Hi, I'm having trouble with my order #12345.\nAssistant: Hello! I'd be happy to help you with order #12345. Could you please tell me what issue you're experiencing?\nUser: The package arrived but one item is damaged.\nAssistant: I'm sorry to hear that. I understand how frustrating that must be. I can help you with a replacement or refund. Which would you prefer?\nUser: I'd like a replacement please.\nAssistant: Absolutely! I've initiated a replacement for the damaged item. You should receive a confirmation email shortly with tracking information. Is there anything else I can help with?\nUser: No, that's all. Thank you!\nAssistant: You're welcome! If you have any other questions, don't hesitate to reach out. Have a great day!",
+            "expected_type": "dialogue",
+            "metadata": {
+                "turns": 9,
+                "size": "large"
+            }
+        }
+    ]
+}

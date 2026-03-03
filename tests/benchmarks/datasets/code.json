@@ -1,0 +1,27 @@
+{
+  "name": "Code Prompts Benchmark Dataset",
+  "description": "Sample code prompts for benchmarking optimization performance",
+  "version": "1.0.0",
+  "samples": [
+    {
+      "text": "def hello_world():\n    print('Hello, World!')\n\nhello_world()",
+      "expected_type": "code",
+      "metadata": {"language": "python", "size": "small"}
+    },
+    {
+      "text": "function calculateSum(arr) {\n    return arr.reduce((a, b) => a + b, 0);\n}\n\nconst result = calculateSum([1, 2, 3, 4, 5]);\nconsole.log(result);",
+      "expected_type": "code",
+      "metadata": {"language": "javascript", "size": "small"}
+    },
+    {
+      "text": "import requests\nimport json\nfrom typing import Dict, List, Optional\n\nclass APIClient:\n    def __init__(self, base_url: str, api_key: str):\n        self.base_url = base_url\n        self.headers = {'Authorization': f'Bearer {api_key}'}\n    \n    def get(self, endpoint: str) -> Dict:\n        response = requests.get(f'{self.base_url}/{endpoint}', headers=self.headers)\n        response.raise_for_status()\n        return response.json()\n    \n    def post(self, endpoint: str, data: Dict) -> Dict:\n        response = requests.post(f'{self.base_url}/{endpoint}', json=data, headers=self.headers)\n        response.raise_for_status()\n        return response.json()",
+      "expected_type": "code",
+      "metadata": {"language": "python", "size": "medium"}
+    },
+    {
+      "text": "public class UserService {\n    private final UserRepository userRepository;\n    private final EmailService emailService;\n    \n    public UserService(UserRepository userRepository, EmailService emailService) {\n        this.userRepository = userRepository;\n        this.emailService = emailService;\n    }\n    \n    public User createUser(CreateUserRequest request) {\n        User user = new User();\n        user.setEmail(request.getEmail());\n        user.setName(request.getName());\n        \n        User savedUser = userRepository.save(user);\n        emailService.sendWelcomeEmail(savedUser.getEmail());\n        \n        return savedUser;\n    }\n}",
+      "expected_type": "code",
+      "metadata": {"language": "java", "size": "medium"}
+    }
+  ]
+}

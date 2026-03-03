@@ -1,0 +1,31 @@
+{
+    "name": "JSON Dataset Benchmark",
+    "description": "Sample JSON structures for benchmarking optimization",
+    "version": "1.0.0",
+    "samples": [
+        {
+            "text": "{\"name\": \"John Doe\", \"age\": 30, \"email\": \"john@example.com\"}",
+            "expected_type": "json",
+            "metadata": {
+                "complexity": "simple",
+                "size": "small"
+            }
+        },
+        {
+            "text": "{\"users\": [{\"id\": 1, \"name\": \"Alice\", \"roles\": [\"admin\", \"user\"]}, {\"id\": 2, \"name\": \"Bob\", \"roles\": [\"user\"]}], \"metadata\": {\"total\": 2, \"page\": 1}}",
+            "expected_type": "json",
+            "metadata": {
+                "complexity": "nested",
+                "size": "medium"
+            }
+        },
+        {
+            "text": "{\"config\": {\"database\": {\"host\": \"localhost\", \"port\": 5432, \"name\": \"myapp\", \"credentials\": {\"username\": \"admin\", \"password\": \"secret\"}}, \"cache\": {\"enabled\": true, \"ttl\": 3600, \"type\": \"redis\"}, \"features\": {\"analytics\": true, \"notifications\": false}}}",
+            "expected_type": "json",
+            "metadata": {
+                "complexity": "deeply_nested",
+                "size": "large"
+            }
+        }
+    ]
+}

@@ -1,0 +1,17 @@
+# Development and testing tools
+# Install with: pip install -r requirements-dev.txt
+
+# First install production dependencies
+-r requirements.txt
+
+# Development tools
+pytest>=8.0.0
+httpx>=0.27.0
+black>=24.1.1
+isort>=5.13.2
+flake8>=7.0.0
+mypy>=1.8.0
+
+# Email validation for Pydantic (dev)
+email-validator>=2.0.0
+
