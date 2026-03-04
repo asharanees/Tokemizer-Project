@@ -38,6 +38,10 @@ export default function Analytics() {
       return res.json();
     },
     refetchInterval: 10000,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: "always",
+    refetchOnReconnect: "always",
+    staleTime: 0,
   });
 
   const { data: telemetry, isLoading: telemetryLoading } = useQuery<TelemetryPass[]>({
@@ -48,6 +52,10 @@ export default function Analytics() {
       return res.json();
     },
     refetchInterval: 15000,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: "always",
+    refetchOnReconnect: "always",
+    staleTime: 0,
   });
 
   const cards = [

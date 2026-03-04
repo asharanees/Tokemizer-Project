@@ -50,6 +50,10 @@ export default function History() {
       return res.json();
     },
     refetchInterval: 15000,
+    refetchIntervalInBackground: true,
+    refetchOnWindowFocus: "always",
+    refetchOnReconnect: "always",
+    staleTime: 0,
   });
 
   const toNumber = (value: unknown, fallback = 0) => {

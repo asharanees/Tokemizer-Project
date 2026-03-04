@@ -75,6 +75,8 @@ logger = logging.getLogger(__name__)
 
 _SPACY_IMPORT_LOCK = threading.Lock()
 _SPACY_COREF_IMPORT_LOCK = threading.Lock()
+_COREF_NLP_SINGLETON_LOCK = threading.Lock()
+_COREF_NLP_SINGLETON = None
 
 
 def _import_spacy():
@@ -6120,7 +6122,13 @@ class PromptOptimizer:
 
     def _get_coref_model(self):
         """Load and cache the spaCy coreference model lazily."""
+        global _COREF_NLP_SINGLETON
+
         if self._coref_nlp is not None:
+            return self._coref_nlp
+
+        if _COREF_NLP_SINGLETON is not None:
+            self._coref_nlp = _COREF_NLP_SINGLETON
             return self._coref_nlp
 
         if self._coref_load_failed:
@@ -6142,14 +6150,20 @@ class PromptOptimizer:
                 return None
 
             try:
-                nlp = spacy_module.blank("en")
+                with _COREF_NLP_SINGLETON_LOCK:
+                    if _COREF_NLP_SINGLETON is not None:
+                        self._coref_nlp = _COREF_NLP_SINGLETON
+                        return self._coref_nlp
 
-                if self._coref_pipe_name not in nlp.pipe_names:
-                    if _import_spacy_coref() is None:
-                        raise ImportError("spacy-coref is not installed")
-                    nlp.add_pipe(self._coref_pipe_name)
+                    nlp = spacy_module.blank("en")
 
-                self._coref_nlp = nlp
+                    if self._coref_pipe_name not in nlp.pipe_names:
+                        if _import_spacy_coref() is None:
+                            raise ImportError("spacy-coref is not installed")
+                        nlp.add_pipe(self._coref_pipe_name)
+
+                    _COREF_NLP_SINGLETON = nlp
+                    self._coref_nlp = nlp
             except (
                 Exception
             ) as exc:  # pragma: no cover - load failures depend on environment

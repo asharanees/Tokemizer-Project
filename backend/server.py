@@ -37,6 +37,7 @@ from database import (
     list_recent_history,
     list_recent_telemetry,
     record_optimization_history,
+    set_admin_setting,
     set_llm_profiles,
     update_batch_job,
     update_canonical_mapping,
@@ -2251,6 +2252,7 @@ def _apply_settings_update(
     ):
         _set_cache_size(request.optimizer_cache_size)
     if "telemetry_enabled" in updated_fields and request.telemetry_enabled is not None:
+        set_admin_setting("telemetry_enabled", request.telemetry_enabled)
         set_telemetry_enabled(request.telemetry_enabled)
     if "lsh_enabled" in updated_fields and request.lsh_enabled is not None:
         optimizer.enable_lsh_deduplication = request.lsh_enabled

@@ -962,7 +962,16 @@ def is_learned_abbreviations_enabled() -> bool:
 
 
 def is_telemetry_enabled() -> bool:
-    """Return whether performance telemetry is enabled via runtime Settings."""
+    """Return whether performance telemetry is enabled.
+
+    Admin DB setting is authoritative so the value stays consistent across
+    multiple worker processes. Runtime toggle remains as fallback.
+    """
+    admin_val = get_admin_setting("telemetry_enabled", None)
+    if admin_val is not None:
+        if isinstance(admin_val, bool):
+            return admin_val
+        return str(admin_val).strip().lower() in {"true", "1", "yes", "on"}
     return telemetry_is_enabled()
 
 

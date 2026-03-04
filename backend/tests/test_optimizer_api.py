@@ -916,6 +916,30 @@ def test_settings_does_not_expose_api_keys(client: TestClient) -> None:
     assert "api_key" not in profile
 
 
+def test_settings_telemetry_toggle_persists_to_admin_settings(client: TestClient) -> None:
+    import server
+    from database import get_admin_setting
+    from services.telemetry_control import set_enabled as set_telemetry_enabled
+
+    set_telemetry_enabled(False)
+
+    update_response = client.patch(
+        "/api/v1/settings",
+        json={"telemetry_enabled": True},
+    )
+    assert update_response.status_code == 200
+    assert update_response.json()["telemetry_enabled"] is True
+
+    # Simulate a different worker process with stale in-memory state.
+    set_telemetry_enabled(False)
+    assert get_admin_setting("telemetry_enabled", None) is True
+    assert server.is_telemetry_enabled() is True
+
+    get_response = client.get("/api/v1/settings")
+    assert get_response.status_code == 200
+    assert get_response.json()["telemetry_enabled"] is True
+
+
 def test_optimize_batch_respects_worker_ceiling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
