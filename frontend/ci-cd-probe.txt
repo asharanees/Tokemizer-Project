@@ -1,0 +1,2 @@
+CI/CD probe for frontend path trigger.
+Timestamp: 2026-03-05

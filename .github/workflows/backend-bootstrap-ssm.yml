@@ -38,13 +38,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          cat > ssm-params.json <<'JSON'
+          REPO_URL="https://github.com/${GITHUB_REPOSITORY}.git"
+
+          cat > ssm-params.json <<JSON
           {
             "commands": [
               "set -euo pipefail",
               "sudo mkdir -p /opt/tokemizer",
-              "if [ ! -d /opt/tokemizer/app/.git ]; then sudo git clone https://github.com/nowusman/tokemizer.git /opt/tokemizer/app; fi",
-              "sudo REPO_URL=https://github.com/nowusman/tokemizer.git BRANCH=${{ github.event.inputs.branch }} EBS_DEVICE=${{ github.event.inputs.ebs_device }} MOUNT_POINT=/data bash /opt/tokemizer/app/infra/aws/ec2/bootstrap_backend_host.sh"
+              "if [ ! -d /opt/tokemizer/app/.git ]; then sudo git clone ${REPO_URL} /opt/tokemizer/app; fi",
+              "sudo REPO_URL=${REPO_URL} BRANCH=${{ github.event.inputs.branch }} EBS_DEVICE=${{ github.event.inputs.ebs_device }} MOUNT_POINT=/data bash /opt/tokemizer/app/infra/aws/ec2/bootstrap_backend_host.sh"
             ]
           }
           JSON

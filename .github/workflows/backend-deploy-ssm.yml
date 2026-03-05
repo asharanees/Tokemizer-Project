@@ -8,6 +8,11 @@ on:
       - "infra/aws/ec2/**"
       - ".github/workflows/backend-deploy-ssm.yml"
   workflow_dispatch:
+    inputs:
+      branch:
+        description: "Git branch to deploy"
+        required: false
+        default: "main"
 
 concurrency:
   group: backend-prod-deploy
@@ -24,6 +29,7 @@ jobs:
       AWS_REGION: ${{ secrets.AWS_REGION }}
       AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
       EC2_INSTANCE_ID: ${{ secrets.BACKEND_EC2_INSTANCE_ID }}
+      TARGET_BRANCH: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.branch || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,13 +45,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          cat > ssm-params.json <<'JSON'
+          cat > ssm-params.json <<JSON
           {
             "commands": [
               "set -euo pipefail",
               "if [ ! -d /opt/tokemizer/app ]; then echo 'ERROR: /opt/tokemizer/app not found. Run bootstrap first.'; exit 1; fi",
               "if [ ! -f /data/tokemizer/env/backend.env ]; then echo 'ERROR: /data/tokemizer/env/backend.env not found.'; exit 1; fi",
-              "sudo bash /opt/tokemizer/app/infra/aws/ec2/deploy_backend.sh main"
+              "sudo bash /opt/tokemizer/app/infra/aws/ec2/deploy_backend.sh ${{ env.TARGET_BRANCH }}"
             ]
           }
           JSON
