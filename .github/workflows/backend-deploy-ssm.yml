@@ -45,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          cat > ssm-params.json <<JSON
+          cat > ssm-params.json <<'JSON'
           {
             "commands": [
               "set -euo pipefail",
