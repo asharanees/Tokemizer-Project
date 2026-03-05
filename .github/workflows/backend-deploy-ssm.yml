@@ -61,6 +61,8 @@ jobs:
               "REPO_URL=https://github.com/${{ github.repository }}.git",
               "if [ ! -d \"$APP_ROOT/.git\" ]; then sudo git clone \"$REPO_URL\" \"$APP_ROOT\"; fi",
               "cd \"$APP_ROOT\"",
+              "git config --global --add safe.directory \"$APP_ROOT\" || true",
+              "sudo git config --global --add safe.directory \"$APP_ROOT\" || true",
               "sudo git remote set-url origin \"$REPO_URL\"",
               "sudo git fetch origin --prune",
               "sudo git checkout ${{ env.TARGET_BRANCH }}",
