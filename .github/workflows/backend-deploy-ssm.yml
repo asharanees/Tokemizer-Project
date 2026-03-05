@@ -57,8 +57,6 @@ jobs:
               "REPO_URL=https://github.com/${{ github.repository }}.git",
               "if [ ! -d \"$APP_ROOT/.git\" ]; then sudo git clone \"$REPO_URL\" \"$APP_ROOT\"; fi",
               "cd \"$APP_ROOT\"",
-              "git config --global --add safe.directory \"$APP_ROOT\" || true",
-              "sudo git config --global --add safe.directory \"$APP_ROOT\" || true",
               "sudo git -c safe.directory=\"$APP_ROOT\" remote set-url origin \"$REPO_URL\"",
               "sudo git -c safe.directory=\"$APP_ROOT\" fetch origin --prune",
               "sudo git -c safe.directory=\"$APP_ROOT\" checkout ${{ env.TARGET_BRANCH }}",
@@ -69,9 +67,9 @@ jobs:
               "sudo systemctl daemon-reload",
               "sudo systemctl enable \"$SERVICE_NAME\"",
               "sudo systemctl restart \"$SERVICE_NAME\"",
-              "sleep 3",
+              "sleep 5",
               "sudo systemctl --no-pager --full status \"$SERVICE_NAME\" | sed -n '1,40p'",
-              "curl -fsS http://127.0.0.1:8000/api/v1/health"
+              "for i in $(seq 1 24); do if curl -fsS http://127.0.0.1:8000/api/v1/health >/dev/null; then echo 'Health check passed'; exit 0; fi; echo \"Waiting for backend health... attempt $i/24\"; sleep 5; done; echo 'ERROR: backend health check failed after waiting'; exit 1"
             ]
           }
           JSON
