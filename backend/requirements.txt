@@ -16,7 +16,7 @@ redis>=5.0.4
 # Pinned to exact version to prevent encoding drift and ensure deterministic behavior
 tiktoken==0.8.0
 numpy>=1.26.0,<2.0.0
-spacy>=3.7.2,<4.0.0
+spacy==3.7.5
 spacy-coref>=0.1.1,<0.2.0
 datasketch>=1.5.4
 sentence-transformers>=2.7.0
