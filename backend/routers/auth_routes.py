@@ -1,5 +1,5 @@
 import logging
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 import auth_utils
 from auth import (get_current_active_customer,
@@ -11,6 +11,7 @@ from database import (Customer, create_customer, get_customer_by_email,
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
+from services.ec2_control import invoke_ec2_control
 from services.email import send_welcome_email
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,13 @@ class PlanResponse(BaseModel):
 class ProfileUpdate(BaseModel):
     name: str
     phone_number: Optional[str] = None
+
+
+class InfrastructureControlResponse(BaseModel):
+    ok: bool
+    action: str
+    instance_state: Optional[str] = None
+    details: dict
 
 
 @router.post("/register", response_model=Token)
@@ -368,3 +376,18 @@ async def list_plans():
         )
         for p in plans
     ]
+
+
+@router.get("/infrastructure/ec2/status", response_model=InfrastructureControlResponse)
+async def get_ec2_status():
+    """Public status endpoint used by login page controls."""
+    return invoke_ec2_control("status")
+
+
+@router.post(
+    "/infrastructure/ec2/{action}",
+    response_model=InfrastructureControlResponse,
+)
+async def control_ec2(action: Literal["start", "stop"]):
+    """Public start/stop endpoint used by login page controls."""
+    return invoke_ec2_control(action)
