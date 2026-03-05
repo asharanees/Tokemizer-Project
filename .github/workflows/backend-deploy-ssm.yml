@@ -51,7 +51,7 @@ jobs:
               "set -euo pipefail",
               "if [ ! -d /opt/tokemizer/app ]; then echo 'ERROR: /opt/tokemizer/app not found. Run bootstrap first.'; exit 1; fi",
               "if [ ! -f /data/tokemizer/env/backend.env ]; then echo 'ERROR: /data/tokemizer/env/backend.env not found.'; exit 1; fi",
-              "sudo bash /opt/tokemizer/app/infra/aws/ec2/deploy_backend.sh ${{ env.TARGET_BRANCH }}"
+              "sudo bash /opt/tokemizer/app/tokemizer/infra/aws/ec2/deploy_backend.sh ${{ env.TARGET_BRANCH }}"
             ]
           }
           JSON
