@@ -297,10 +297,11 @@ export function OptimizerPlayground() {
       });
     },
     onError: (error) => {
+      const rawMessage = error instanceof Error ? error.message : "";
       const message =
-        error instanceof Error && error.message
-          ? error.message
-          : "Please try again with a different prompt.";
+        rawMessage && /failed to fetch|networkerror|network request/i.test(rawMessage)
+          ? "Network/API timeout while contacting LLM optimizer. Try a shorter prompt, retry, or verify backend CORS/API health."
+          : rawMessage || "Please try again with a different prompt.";
       toast({
         title: "Optimization Failed",
         description: message,

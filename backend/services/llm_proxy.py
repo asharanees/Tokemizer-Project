@@ -21,6 +21,26 @@ def _resolve_provider_timeout_seconds() -> int:
     return max(5, min(parsed, 300))
 
 
+def _resolve_ollama_timeout_seconds() -> int:
+    raw_value = os.getenv("LLM_PROVIDER_TIMEOUT_SECONDS_OLLAMA", "").strip()
+    if not raw_value:
+        raw_value = os.getenv("LLM_PROVIDER_TIMEOUT_SECONDS", "20").strip()
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return 20
+    return max(5, min(parsed, 25))
+
+
+def _resolve_ollama_retry_count() -> int:
+    raw_value = os.getenv("LLM_PROVIDER_RETRY_COUNT_OLLAMA", "1").strip()
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, min(parsed, 2))
+
+
 @dataclass
 class LLMResult:
     text: str
@@ -132,6 +152,7 @@ def _post_json(
     headers: Dict[str, str],
     payload: Dict[str, Any],
     params: Dict[str, str] | None = None,
+    timeout_seconds: int | None = None,
 ) -> Tuple[Dict[str, Any] | None, float]:
     started_at = time.perf_counter()
     try:
@@ -140,7 +161,7 @@ def _post_json(
             headers=headers,
             json=payload,
             params=params,
-            timeout=_resolve_provider_timeout_seconds(),
+            timeout=timeout_seconds or _resolve_provider_timeout_seconds(),
         )
     except requests.RequestException as exc:  # pragma: no cover - network failures
         raise LLMProviderError("Network request to provider failed") from exc
@@ -301,9 +322,11 @@ def _call_ollama(model: str, prompt: str, api_key: str) -> LLMResult:
     # API key field doubles as endpoint override in the UI.
     base_url = _resolve_ollama_base_url(api_key)
     url = f"{base_url}/api/chat"
+    timeout_seconds = _resolve_ollama_timeout_seconds()
+    max_attempts = _resolve_ollama_retry_count()
 
     last_error: LLMProviderError | None = None
-    for attempt in range(1, 4):
+    for attempt in range(1, max_attempts + 1):
         try:
             data, duration_ms = _post_json(
                 url,
@@ -313,13 +336,14 @@ def _call_ollama(model: str, prompt: str, api_key: str) -> LLMResult:
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
                 },
+                timeout_seconds=timeout_seconds,
             )
             break
         except LLMProviderError as exc:
             last_error = exc
-            if attempt >= 3:
+            if attempt >= max_attempts:
                 raise
-            time.sleep(float(attempt))
+            time.sleep(1.0)
     else:  # pragma: no cover - defensive branch
         if last_error is not None:
             raise last_error
