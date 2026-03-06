@@ -24,15 +24,59 @@ def _read_action(event: Dict[str, Any]) -> str:
     return action
 
 
+def _read_target(event: Dict[str, Any]) -> str:
+    raw_target = (
+        event.get("target")
+        or event.get("detail", {}).get("target")
+        or event.get("queryStringParameters", {}).get("target")
+        or "backend"
+    )
+    target = str(raw_target or "backend").strip().lower()
+    if not target:
+        target = "backend"
+    for char in target:
+        if not (char.isalnum() or char in {"-", "_"}):
+            raise ValueError("target contains invalid characters")
+    return target
+
+
+def _resolve_instance_id(target: str) -> str:
+    raw_map = os.environ.get("TOKEMIZER_EC2_INSTANCE_MAP", "").strip()
+    if raw_map:
+        try:
+            parsed = json.loads(raw_map)
+            if isinstance(parsed, dict):
+                value = str(parsed.get(target, "")).strip()
+                if value:
+                    return value
+        except Exception:
+            pass
+
+    if target == "backend":
+        return os.environ.get("TOKEMIZER_EC2_INSTANCE_ID", "").strip()
+
+    specific_key = f"TOKEMIZER_EC2_INSTANCE_ID_{target.upper().replace('-', '_')}"
+    return os.environ.get(specific_key, "").strip()
+
+
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     try:
-        action = _read_action(event if isinstance(event, dict) else {})
+        normalized_event = event if isinstance(event, dict) else {}
+        action = _read_action(normalized_event)
+        target = _read_target(normalized_event)
     except ValueError as exc:
         return _response(400, {"ok": False, "error": str(exc)})
 
-    instance_id = os.environ.get("TOKEMIZER_EC2_INSTANCE_ID", "").strip()
+    instance_id = _resolve_instance_id(target)
     if not instance_id:
-        return _response(500, {"ok": False, "error": "TOKEMIZER_EC2_INSTANCE_ID is not set"})
+        return _response(
+            500,
+            {
+                "ok": False,
+                "target": target,
+                "error": "Instance ID is not configured for target",
+            },
+        )
 
     region_name = os.environ.get("AWS_REGION", "us-east-1").strip() or "us-east-1"
     ec2 = boto3.client("ec2", region_name=region_name)
@@ -50,6 +94,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 {
                     "ok": True,
                     "action": action,
+                    "target": target,
                     "instance_id": instance_id,
                     "instance_state": state,
                 },
@@ -67,6 +112,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
                 {
                     "ok": True,
                     "action": action,
+                    "target": target,
                     "instance_id": instance_id,
                     "instance_state": state,
                 },
@@ -81,9 +127,18 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             {
                 "ok": True,
                 "action": action,
+                "target": target,
                 "instance_id": instance_id,
                 "instance_state": state,
             },
         )
     except Exception as exc:
-        return _response(500, {"ok": False, "action": action, "error": str(exc)})
+        return _response(
+            500,
+            {
+                "ok": False,
+                "action": action,
+                "target": target,
+                "error": str(exc),
+            },
+        )

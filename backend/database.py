@@ -43,6 +43,7 @@ _TELEMETRY_BATCH_SIZE = 50
 _TELEMETRY_FLUSH_INTERVAL_SECONDS = 5.0
 _SETTINGS_KEY_LLM_PROFILES = "llm_profiles"
 _ADMIN_SETTING_CANONICAL_CACHE_VERSION = "canonical_cache_version"
+_ADMIN_SETTING_LLM_SYSTEM_CONTEXT = "llm_system_context"
 _LEARNED_PHRASE_MAX_ENTRIES_DEFAULT = 200
 _LEARNED_PHRASE_TTL_DAYS_DEFAULT = 90
 
@@ -1027,6 +1028,35 @@ def set_llm_profiles(customer_id: str, profiles: List[Dict[str, str]]) -> None:
             """,
             (_SETTINGS_KEY_LLM_PROFILES, customer_id, payload, timestamp),
         )
+
+
+def _load_default_llm_system_context() -> str:
+    default_path = ROOT_DIR.parent / "LLM compression context.txt"
+    try:
+        content = default_path.read_text(encoding="utf-8").strip()
+        if content:
+            return content
+    except OSError:
+        pass
+    return (
+        "You are an expert semantic compression engine. Compress text aggressively while "
+        "preserving meaning, facts, numbers, quoted text, code blocks, constraints, and "
+        "actionable instructions. Return only the compressed result."
+    )
+
+
+def get_llm_system_context() -> str:
+    value = get_admin_setting(_ADMIN_SETTING_LLM_SYSTEM_CONTEXT, None)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return _load_default_llm_system_context()
+
+
+def set_llm_system_context(value: str) -> None:
+    cleaned_value = (value or "").strip()
+    if not cleaned_value:
+        cleaned_value = _load_default_llm_system_context()
+    set_admin_setting(_ADMIN_SETTING_LLM_SYSTEM_CONTEXT, cleaned_value)
 
 
 def _cleanup_learned_phrase_dictionary(customer_id: str) -> None:

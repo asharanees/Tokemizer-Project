@@ -379,15 +379,15 @@ async def list_plans():
 
 
 @router.get("/infrastructure/ec2/status", response_model=InfrastructureControlResponse)
-async def get_ec2_status():
+async def get_ec2_status(target: str = "backend"):
     """Public status endpoint used by login page controls."""
-    return invoke_ec2_control("status")
+    return invoke_ec2_control("status", target=target)
 
 
 @router.post(
     "/infrastructure/ec2/{action}",
     response_model=InfrastructureControlResponse,
 )
-async def control_ec2(action: Literal["start", "stop"]):
+async def control_ec2(action: Literal["start", "stop"], target: str = "backend"):
     """Public start/stop endpoint used by login page controls."""
-    return invoke_ec2_control(action)
+    return invoke_ec2_control(action, target=target)

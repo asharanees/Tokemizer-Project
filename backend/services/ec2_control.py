@@ -47,10 +47,14 @@ def _normalize_lambda_payload(payload: Dict[str, Any], action: str) -> Dict[str,
     }
 
 
-def invoke_ec2_control(action: str) -> Dict[str, Any]:
+def invoke_ec2_control(action: str, target: str = "backend") -> Dict[str, Any]:
     normalized_action = (action or "").strip().lower()
     if normalized_action not in _ALLOWED_ACTIONS:
         raise HTTPException(status_code=400, detail="action must be start|stop|status")
+
+    normalized_target = (target or "backend").strip().lower()
+    if not normalized_target:
+        normalized_target = "backend"
 
     if not _env_truthy("EC2_CONTROL_ENABLED", "false"):
         raise HTTPException(
@@ -80,6 +84,7 @@ def invoke_ec2_control(action: str) -> Dict[str, Any]:
     client = boto3.client("lambda", region_name=region_name)
     request_payload = {
         "action": normalized_action,
+        "target": normalized_target,
         "source": "tokemizer-backend",
     }
     invoke_kwargs: Dict[str, Any] = {
@@ -123,4 +128,6 @@ def invoke_ec2_control(action: str) -> Dict[str, Any]:
             },
         )
 
-    return _normalize_lambda_payload(payload_obj, normalized_action)
+    response_payload = _normalize_lambda_payload(payload_obj, normalized_action)
+    response_payload["target"] = normalized_target
+    return response_payload

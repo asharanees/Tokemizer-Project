@@ -12,6 +12,15 @@ class LLMProviderError(Exception):
     """Raised when an upstream LLM provider returns an error."""
 
 
+def _resolve_provider_timeout_seconds() -> int:
+    raw_value = os.getenv("LLM_PROVIDER_TIMEOUT_SECONDS", "120").strip()
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return 120
+    return max(5, min(parsed, 300))
+
+
 @dataclass
 class LLMResult:
     text: str
@@ -131,7 +140,7 @@ def _post_json(
             headers=headers,
             json=payload,
             params=params,
-            timeout=60,
+            timeout=_resolve_provider_timeout_seconds(),
         )
     except requests.RequestException as exc:  # pragma: no cover - network failures
         raise LLMProviderError("Network request to provider failed") from exc
@@ -293,15 +302,28 @@ def _call_ollama(model: str, prompt: str, api_key: str) -> LLMResult:
     base_url = _resolve_ollama_base_url(api_key)
     url = f"{base_url}/api/chat"
 
-    data, duration_ms = _post_json(
-        url,
-        headers={"Content-Type": "application/json"},
-        payload={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "stream": False,
-        },
-    )
+    last_error: LLMProviderError | None = None
+    for attempt in range(1, 4):
+        try:
+            data, duration_ms = _post_json(
+                url,
+                headers={"Content-Type": "application/json"},
+                payload={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                },
+            )
+            break
+        except LLMProviderError as exc:
+            last_error = exc
+            if attempt >= 3:
+                raise
+            time.sleep(float(attempt))
+    else:  # pragma: no cover - defensive branch
+        if last_error is not None:
+            raise last_error
+        raise LLMProviderError("Provider request failed")
 
     # Ollama /api/chat response format: {"model":..., "message": {"role": "assistant", "content": "..."}}
     text = data.get("message", {}).get("content", "").strip()

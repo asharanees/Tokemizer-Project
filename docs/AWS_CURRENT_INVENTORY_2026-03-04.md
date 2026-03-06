@@ -109,3 +109,51 @@ Account: `980874804229`
 - This inventory reflects the state after cleanup of duplicate Tokemizer APIs, VPC links, ALBs, and orphan target groups.
 - Health check through active API returns `200 OK`:
   - `https://d01boo3jka.execute-api.us-east-1.amazonaws.com/prod/api/v1/health`
+
+---
+
+## LLM-based option resources (added 2026-03-06)
+
+### Created resources
+
+1. **LLM EC2 host**
+   - Instance ID: `i-09977bea376d50334`
+   - State: `running`
+   - Type: `t3.2xlarge`
+   - VPC/Subnet: `vpc-075ddd90c62a85648` / `subnet-0c392cffb70a36447`
+   - Private IP: `10.80.1.191`
+   - Security Group: `sg-089d28eb402d489ea`
+   - Instance Profile: `arn:aws:iam::980874804229:instance-profile/Tokemizer-Project-20260302040749-EC2-Profile`
+   - Launch time: `2026-03-06T13:31:45+00:00`
+
+2. **LLM model data volume**
+   - Volume ID: `vol-0153eaff23bd0df59`
+   - State: `in-use`
+   - Size/Type: `80 GiB gp3`
+   - IOPS/Throughput: `3000 / 125`
+   - AZ: `us-east-1a`
+   - Attached to: `i-09977bea376d50334` (`/dev/sdf`)
+
+### Updated existing resources
+
+1. **Security Group update** (`sg-089d28eb402d489ea`)
+   - Added ingress: `tcp/11434`
+   - Source: self-referencing SG (`sg-089d28eb402d489ea`)
+   - Purpose: backend-to-LLM Ollama traffic
+
+2. **EC2 IAM role inline policy added**
+   - Role: `Tokemizer-Project-20260302040749-EC2-Role`
+   - Policy: `TokemizerModelS3ReadAccess`
+   - Grants:
+     - `s3:GetObject`, `s3:HeadObject` on `arn:aws:s3:::tokemizer-980874804229-us-east-1-20260128-092031/models/*`
+     - `s3:ListBucket` on `arn:aws:s3:::tokemizer-980874804229-us-east-1-20260128-092031` with prefix `models/*`
+
+3. **EC2 control Lambda mapping updated**
+   - Function: `tokemizer-ec2-control`
+   - Env var map: `TOKEMIZER_EC2_INSTANCE_MAP={"backend":"i-0091e5c28f3715e0d","llm":"i-09977bea376d50334"}`
+   - Result: target-aware `backend` and `llm` EC2 lifecycle control
+
+### Runtime artifacts (host-level)
+
+- Ollama model registered on LLM host: `tokemizer-q4_k_m:latest`
+- Backend host wired to LLM host via `LLM_OPTIMIZER_OLLAMA_BASE_URL=http://10.80.1.191:11434`

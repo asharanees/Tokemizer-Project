@@ -106,6 +106,7 @@ interface SettingsResponse {
 export function OptimizerPlayground() {
   const [input, setInput] = useState("");
   const [output, setOutput] = useState("");
+  const [optimizationTechnique, setOptimizationTechnique] = useState<"rule_based" | "llm_based">("rule_based");
   const [optimizationMode, setOptimizationMode] = useState<"conservative" | "balanced" | "maximum">("balanced");
   const [batchName, setBatchName] = useState("");
   const [segmentSpans, setSegmentSpans] = useState("");
@@ -204,6 +205,7 @@ export function OptimizerPlayground() {
     mutationFn: async (prompt: string) => {
       const payload: Record<string, unknown> = {
         prompt,
+        optimization_technique: optimizationTechnique,
         optimization_mode: optimizationMode,
       };
 
@@ -525,7 +527,26 @@ export function OptimizerPlayground() {
         <div className="flex flex-col lg:flex-row gap-6 items-start">
           {/* Left Side: Mode, Stats, Content Type (60%) */}
           <div className="w-full lg:w-[60%] space-y-3">
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+              <div className="space-y-1.5">
+                <FieldLabel
+                  label="Optimization Technique"
+                  help="Choose between local rule-based optimization and advanced LLM-based optimization."
+                />
+                <Select
+                  value={optimizationTechnique}
+                  onValueChange={(v) => setOptimizationTechnique(v as typeof optimizationTechnique)}
+                >
+                  <SelectTrigger className="h-8 text-xs">
+                    <SelectValue placeholder="Select technique" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="rule_based">Rule based (FAST)</SelectItem>
+                    <SelectItem value="llm_based">LLM based (ADVANCED)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
               <div className="space-y-1.5">
                 <FieldLabel
                   label="Optimization Mode"

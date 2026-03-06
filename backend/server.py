@@ -27,6 +27,7 @@ from database import (
     get_canonical_mappings_cache,
     get_customer_by_id,
     get_llm_profiles,
+    get_llm_system_context,
     get_optimization_history_record,
     get_subscription_plan_by_id,
     get_usage,
@@ -39,6 +40,7 @@ from database import (
     record_optimization_history,
     set_admin_setting,
     set_llm_profiles,
+    set_llm_system_context,
     update_batch_job,
     update_canonical_mapping,
 )
@@ -1766,6 +1768,9 @@ def _optimize_single(
     background_tasks: BackgroundTasks,
     customer_id: Optional[str] = None,
 ) -> OptimizationResponse:
+    if request.optimization_technique == "llm_based":
+        return _optimize_single_llm(prompt, request)
+
     from services.optimizer.core import TIKTOKEN_AVAILABLE, np
 
     if not TIKTOKEN_AVAILABLE:
@@ -1921,6 +1926,85 @@ def _optimize_single(
         router=router,
         techniques_applied=raw_result.get("techniques_applied"),
         warnings=warnings if warnings else None,
+    )
+
+
+def _optimize_single_llm(
+    prompt: str,
+    request: OptimizationRequest,
+) -> OptimizationResponse:
+    started_at = time.perf_counter()
+
+    provider = os.getenv("LLM_OPTIMIZER_PROVIDER", "ollama").strip() or "ollama"
+    model = (
+        os.getenv("LLM_OPTIMIZER_MODEL", "tokemizer-q4_k_m").strip()
+        or "tokemizer-q4_k_m"
+    )
+    api_key = os.getenv("LLM_OPTIMIZER_API_KEY", "").strip()
+
+    if provider == "ollama" and not api_key:
+        api_key = os.getenv("LLM_OPTIMIZER_OLLAMA_BASE_URL", "").strip()
+
+    user_prompt_parts: List[str] = [
+        f"Optimization mode: {request.optimization_mode}",
+        "Input:",
+        prompt,
+    ]
+    if request.query:
+        user_prompt_parts.insert(1, f"Query hint: {request.query}")
+    user_prompt = "\n\n".join(part for part in user_prompt_parts if part)
+
+    system_context = get_llm_system_context()
+    composed_prompt = f"System Context:\n{system_context}\n\nUser Prompt:\n{user_prompt}"
+
+    try:
+        llm_result = call_llm(provider, model, composed_prompt, api_key)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    except LLMProviderError as error:
+        raise HTTPException(status_code=502, detail=str(error)) from error
+
+    optimized_output = (llm_result.text or "").strip()
+    if not optimized_output:
+        raise HTTPException(status_code=502, detail="LLM optimizer returned empty output")
+
+    processing_time_ms = max(
+        llm_result.duration_ms,
+        (time.perf_counter() - started_at) * 1000.0,
+    )
+    original_chars = len(prompt)
+    optimized_chars = len(optimized_output)
+    original_tokens = max(1, (original_chars + 3) // 4)
+    optimized_tokens = max(1, (optimized_chars + 3) // 4)
+    token_savings = max(0, original_tokens - optimized_tokens)
+    compression_percentage = (
+        (token_savings / original_tokens) * 100.0 if original_tokens else 0.0
+    )
+
+    return OptimizationResponse(
+        optimized_output=optimized_output,
+        stats=OptimizationStats(
+            original_chars=original_chars,
+            optimized_chars=optimized_chars,
+            compression_percentage=compression_percentage,
+            original_tokens=original_tokens,
+            optimized_tokens=optimized_tokens,
+            token_savings=token_savings,
+            processing_time_ms=processing_time_ms,
+            fast_path=False,
+            content_profile="llm_based",
+            smart_context_description=f"LLM-based optimization via {provider}:{model}",
+            semantic_similarity=None,
+            semantic_similarity_source=None,
+            deduplication=None,
+        ),
+        router={"content_type": "llm_based", "profile": "llm_based"},
+        techniques_applied=[
+            "LLM Based Optimization",
+            f"Provider: {provider}",
+            f"Model: {model}",
+        ],
+        warnings=None,
     )
 
 
@@ -2165,6 +2249,7 @@ class SettingsResponse(BaseModel):
     telemetry_enabled: bool
     lsh_enabled: bool
     lsh_similarity_threshold: float
+    llm_system_context: str
     llm_profiles: List[LLMProfile]
 
 
@@ -2181,6 +2266,7 @@ class SettingsUpdateRequest(BaseModel):
     telemetry_enabled: Optional[bool] = None
     lsh_enabled: Optional[bool] = None
     lsh_similarity_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
+    llm_system_context: Optional[str] = None
     llm_profiles: Optional[List[LLMProfile]] = None
 
 
@@ -2197,6 +2283,7 @@ def _build_settings_response(customer_id: Optional[str] = None) -> SettingsRespo
         telemetry_enabled=is_telemetry_enabled(),
         lsh_enabled=getattr(optimizer, "enable_lsh_deduplication", False),
         lsh_similarity_threshold=getattr(optimizer, "lsh_similarity_threshold", 0.0),
+        llm_system_context=get_llm_system_context(),
         llm_profiles=[
             LLMProfile(
                 name=profile["name"],
@@ -2263,6 +2350,8 @@ def _apply_settings_update(
         optimizer.lsh_similarity_threshold = max(
             0.0, min(request.lsh_similarity_threshold, 1.0)
         )
+    if "llm_system_context" in updated_fields and request.llm_system_context is not None:
+        set_llm_system_context(request.llm_system_context)
     if (
         "llm_profiles" in updated_fields
         and request.llm_profiles is not None

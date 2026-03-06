@@ -61,6 +61,7 @@ export default function BatchJobs() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [promptsInput, setPromptsInput] = useState("");
+  const [technique, setTechnique] = useState<"rule_based" | "llm_based">("rule_based");
   const [mode, setMode] = useState<"conservative" | "balanced" | "maximum">("balanced");
   const [batchName, setBatchName] = useState("");
   const [queryHint, setQueryHint] = useState("");
@@ -113,6 +114,7 @@ export default function BatchJobs() {
       }
       const payload: Record<string, unknown> = {
         prompts,
+        optimization_technique: technique,
         optimization_mode: mode,
       };
       const trimmedBatchName = batchName.trim();
@@ -241,19 +243,37 @@ export default function BatchJobs() {
             <h1 className="text-2xl sm:text-3xl font-bold font-space-grotesk mb-2">Batch Jobs</h1>
             <p className="text-xs sm:text-sm text-muted-foreground">Process multiple prompts at scale with batch optimization</p>
           </div>
-          <div className="flex gap-2 flex-wrap">
-            {["conservative", "balanced", "maximum"].map((m) => (
-              <Button
-                key={m}
-                variant={mode === m ? "default" : "outline"}
-                size="sm"
-                className="text-xs sm:text-sm"
-                onClick={() => setMode(m as typeof mode)}
-                tooltip={`Set optimization mode to ${m} - ${m === "conservative" ? "Minimal changes, maximum safety" : m === "balanced" ? "Moderate optimization with good safety" : "Maximum optimization, higher risk"}`}
-              >
-                {m}
-              </Button>
-            ))}
+          <div className="flex flex-col gap-2">
+            <div className="flex gap-2 flex-wrap">
+              {[
+                { key: "rule_based", label: "Rule based (FAST)" },
+                { key: "llm_based", label: "LLM based (ADVANCED)" },
+              ].map((item) => (
+                <Button
+                  key={item.key}
+                  variant={technique === item.key ? "default" : "outline"}
+                  size="sm"
+                  className="text-xs sm:text-sm"
+                  onClick={() => setTechnique(item.key as typeof technique)}
+                >
+                  {item.label}
+                </Button>
+              ))}
+            </div>
+            <div className="flex gap-2 flex-wrap">
+              {["conservative", "balanced", "maximum"].map((m) => (
+                <Button
+                  key={m}
+                  variant={mode === m ? "default" : "outline"}
+                  size="sm"
+                  className="text-xs sm:text-sm"
+                  onClick={() => setMode(m as typeof mode)}
+                  tooltip={`Set optimization mode to ${m} - ${m === "conservative" ? "Minimal changes, maximum safety" : m === "balanced" ? "Moderate optimization with good safety" : "Maximum optimization, higher risk"}`}
+                >
+                  {m}
+                </Button>
+              ))}
+            </div>
           </div>
         </div>
 

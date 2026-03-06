@@ -34,6 +34,15 @@ class OptimizationRequest(BaseModel):
                     "summary": "Single prompt (balanced)",
                     "value": {
                         "prompt": "Summarize onboarding process",
+                        "optimization_technique": "rule_based",
+                        "optimization_mode": "balanced",
+                    },
+                },
+                {
+                    "summary": "Single prompt (LLM based)",
+                    "value": {
+                        "prompt": "Summarize onboarding process",
+                        "optimization_technique": "llm_based",
                         "optimization_mode": "balanced",
                     },
                 },
@@ -41,6 +50,7 @@ class OptimizationRequest(BaseModel):
                     "summary": "Batch with balanced mode",
                     "value": {
                         "prompts": ["Prompt A", "Prompt B"],
+                        "optimization_technique": "rule_based",
                         "optimization_mode": "balanced",
                     },
                 },
@@ -70,6 +80,13 @@ class OptimizationRequest(BaseModel):
         description="Batch of prompts to optimize synchronously",
     )
     name: Optional[str] = Field(None, description="Friendly batch name for dashboards")
+    optimization_technique: Literal["rule_based", "llm_based"] = Field(
+        "rule_based",
+        description=(
+            "Optimization engine selection. 'rule_based' uses local deterministic passes; "
+            "'llm_based' uses configured LLM inference for advanced semantic compression."
+        ),
+    )
     optimization_mode: Literal["conservative", "balanced", "maximum"] = Field(
         "balanced",
         description=(
@@ -102,6 +119,21 @@ class OptimizationRequest(BaseModel):
             "maximal": "maximum",
             "safe": "conservative",
             "normal": "balanced",
+        }
+        return aliases.get(normalized, normalized)
+
+    @field_validator("optimization_technique", mode="before")
+    @classmethod
+    def normalize_optimization_technique(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip().lower()
+        aliases = {
+            "rule": "rule_based",
+            "rules": "rule_based",
+            "fast": "rule_based",
+            "llm": "llm_based",
+            "advanced": "llm_based",
         }
         return aliases.get(normalized, normalized)
 
