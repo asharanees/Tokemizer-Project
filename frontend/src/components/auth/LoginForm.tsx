@@ -13,6 +13,10 @@ interface LoginFormProps {
     onRegisterClick: () => void;
 }
 
+const directEc2ControlBaseUrl = (import.meta.env.VITE_EC2_CONTROL_URL || "")
+    .trim()
+    .replace(/\/+$/, "");
+
 export function LoginForm({ onRegisterClick }: LoginFormProps) {
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
@@ -53,6 +57,37 @@ export function LoginForm({ onRegisterClick }: LoginFormProps) {
             return `${fallback} (HTTP ${response.status})`;
         }
         return text;
+    };
+
+    const requestEc2Control = async (action: "start" | "stop" | "status") => {
+        const backendPath =
+            action === "status"
+                ? "/api/auth/infrastructure/ec2/status"
+                : `/api/auth/infrastructure/ec2/${action}`;
+        const backendMethod = action === "status" ? "GET" : "POST";
+        try {
+            const response = await fetch(toApiUrl(backendPath), {
+                method: backendMethod,
+            });
+            if (!response.ok) {
+                const message = await readErrorMessage(response, `Unable to ${action} EC2`);
+                throw new Error(message);
+            }
+            return await response.json();
+        } catch (primaryError: unknown) {
+            if (!directEc2ControlBaseUrl) {
+                throw primaryError;
+            }
+            const directUrl = `${directEc2ControlBaseUrl}/?action=${action}`;
+            const fallbackResponse = await fetch(directUrl, {
+                method: "GET",
+            });
+            if (!fallbackResponse.ok) {
+                const message = await readErrorMessage(fallbackResponse, `Unable to ${action} EC2`);
+                throw new Error(message);
+            }
+            return await fallbackResponse.json();
+        }
     };
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -99,14 +134,7 @@ export function LoginForm({ onRegisterClick }: LoginFormProps) {
     const fetchEc2Status = async () => {
         setIsInfraBusy(true);
         try {
-            const response = await fetch(toApiUrl("/api/auth/infrastructure/ec2/status"), {
-                method: "GET",
-            });
-            if (!response.ok) {
-                const message = await readErrorMessage(response, "Unable to fetch EC2 status");
-                throw new Error(message);
-            }
-            const data = await response.json();
+            const data = await requestEc2Control("status");
             const instanceState =
                 typeof data?.instance_state === "string"
                     ? data.instance_state
@@ -131,14 +159,7 @@ export function LoginForm({ onRegisterClick }: LoginFormProps) {
     const runEc2Action = async (action: "start" | "stop") => {
         setIsInfraBusy(true);
         try {
-            const response = await fetch(toApiUrl(`/api/auth/infrastructure/ec2/${action}`), {
-                method: "POST",
-            });
-            if (!response.ok) {
-                const message = await readErrorMessage(response, `Unable to ${action} EC2`);
-                throw new Error(message);
-            }
-            const data = await response.json();
+            const data = await requestEc2Control(action);
             const nextState =
                 typeof data?.instance_state === "string"
                     ? data.instance_state
