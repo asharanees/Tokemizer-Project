@@ -343,3 +343,23 @@ class OptimizationBatchResponse(BaseModel):
         ..., description="Batch of optimization results"
     )
     summary: OptimizationBatchSummary = Field(..., description="Batch summary metrics")
+
+
+class LLMOptimizationSubmitResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str
+    status: Literal["queued", "processing", "completed", "failed"]
+
+
+class LLMOptimizationJobResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str
+    status: Literal["queued", "processing", "completed", "failed"]
+    attempts: int
+    created_at: str
+    updated_at: str
+    completed_at: Optional[str] = None
+    result: Optional[OptimizationResponse] = None
+    error_message: Optional[str] = None

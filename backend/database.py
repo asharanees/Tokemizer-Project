@@ -835,6 +835,32 @@ def init_db() -> None:
                 """)
 
             conn.execute("""
+                CREATE TABLE IF NOT EXISTS llm_optimization_jobs (
+                    id TEXT PRIMARY KEY,
+                    customer_id TEXT,
+                    status TEXT NOT NULL,
+                    request_payload TEXT NOT NULL,
+                    result_payload TEXT,
+                    error_message TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    FOREIGN KEY (customer_id) REFERENCES customers(id)
+                )
+                """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_llm_optimization_jobs_created_at
+                ON llm_optimization_jobs(created_at)
+                """)
+
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_llm_optimization_jobs_customer_status
+                ON llm_optimization_jobs(customer_id, status)
+                """)
+
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS settings (
                     key TEXT NOT NULL,
                     customer_id TEXT NOT NULL,
@@ -1185,6 +1211,20 @@ class BatchJobRecord:
     total_savings_percentage: Optional[float]
     processing_time_ms: Optional[float]
     created_at: str
+    completed_at: Optional[str]
+
+
+@dataclass
+class LLMOptimizationJobRecord:
+    id: str
+    customer_id: Optional[str]
+    status: str
+    request_payload: Dict[str, Any]
+    result_payload: Optional[Dict[str, Any]]
+    error_message: Optional[str]
+    attempts: int
+    created_at: str
+    updated_at: str
     completed_at: Optional[str]
 
 
@@ -2167,6 +2207,168 @@ def list_batch_jobs(
         )
         for row in rows
     ]
+
+
+def create_llm_optimization_job(
+    *, customer_id: Optional[str], request_payload: Dict[str, Any]
+) -> LLMOptimizationJobRecord:
+    init_db()
+    job_id = str(uuid.uuid4())
+    timestamp = datetime.now(timezone.utc).isoformat()
+    payload_json = json.dumps(request_payload, ensure_ascii=False)
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO llm_optimization_jobs (
+                id,
+                customer_id,
+                status,
+                request_payload,
+                result_payload,
+                error_message,
+                attempts,
+                created_at,
+                updated_at,
+                completed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                job_id,
+                customer_id,
+                "queued",
+                payload_json,
+                None,
+                None,
+                0,
+                timestamp,
+                timestamp,
+                None,
+            ),
+        )
+    return LLMOptimizationJobRecord(
+        id=job_id,
+        customer_id=customer_id,
+        status="queued",
+        request_payload=request_payload,
+        result_payload=None,
+        error_message=None,
+        attempts=0,
+        created_at=timestamp,
+        updated_at=timestamp,
+        completed_at=None,
+    )
+
+
+def get_llm_optimization_job(
+    job_id: str, *, customer_id: Optional[str] = None
+) -> Optional[LLMOptimizationJobRecord]:
+    init_db()
+    with get_db() as conn:
+        where_clause = "id = ?"
+        params: List[Any] = [job_id]
+        if customer_id is not None:
+            where_clause += " AND customer_id = ?"
+            params.append(customer_id)
+        cursor = conn.execute(
+            """
+            SELECT
+                id,
+                customer_id,
+                status,
+                request_payload,
+                result_payload,
+                error_message,
+                attempts,
+                created_at,
+                updated_at,
+                completed_at
+            FROM llm_optimization_jobs
+            WHERE """
+            + where_clause,
+            tuple(params),
+        )
+        row = cursor.fetchone()
+
+    if not row:
+        return None
+
+    request_payload: Dict[str, Any] = {}
+    result_payload: Optional[Dict[str, Any]] = None
+    try:
+        parsed_request = json.loads(row["request_payload"])
+        if isinstance(parsed_request, dict):
+            request_payload = parsed_request
+    except (TypeError, ValueError, json.JSONDecodeError):
+        request_payload = {}
+
+    if row["result_payload"]:
+        try:
+            parsed_result = json.loads(row["result_payload"])
+            if isinstance(parsed_result, dict):
+                result_payload = parsed_result
+        except (TypeError, ValueError, json.JSONDecodeError):
+            result_payload = None
+
+    return LLMOptimizationJobRecord(
+        id=row["id"],
+        customer_id=row["customer_id"],
+        status=row["status"],
+        request_payload=request_payload,
+        result_payload=result_payload,
+        error_message=row["error_message"],
+        attempts=int(row["attempts"] or 0),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        completed_at=row["completed_at"],
+    )
+
+
+def update_llm_optimization_job(
+    job_id: str,
+    *,
+    customer_id: Optional[str] = None,
+    status: Optional[str] = None,
+    result_payload: Optional[Dict[str, Any]] = None,
+    error_message: Optional[str] = None,
+    attempts: Optional[int] = None,
+    completed_at: Optional[str] = None,
+) -> Optional[LLMOptimizationJobRecord]:
+    init_db()
+    updates: Dict[str, Any] = {"updated_at": datetime.now(timezone.utc).isoformat()}
+
+    if status is not None:
+        updates["status"] = status
+    if result_payload is not None:
+        updates["result_payload"] = json.dumps(result_payload, ensure_ascii=False)
+    if error_message is not None:
+        updates["error_message"] = error_message
+    if attempts is not None:
+        updates["attempts"] = int(attempts)
+    if completed_at is not None:
+        updates["completed_at"] = completed_at
+
+    if len(updates) == 1:  # only updated_at
+        return get_llm_optimization_job(job_id, customer_id=customer_id)
+
+    columns = []
+    values: List[Any] = []
+    for key, value in updates.items():
+        columns.append(f"{key} = ?")
+        values.append(value)
+
+    values.append(job_id)
+    where_clause = "id = ?"
+    if customer_id is not None:
+        where_clause += " AND customer_id = ?"
+        values.append(customer_id)
+
+    with get_db() as conn:
+        conn.execute(
+            f"UPDATE llm_optimization_jobs SET {', '.join(columns)} WHERE {where_clause}",
+            tuple(values),
+        )
+
+    return get_llm_optimization_job(job_id, customer_id=customer_id)
 
 
 # ============================================================================

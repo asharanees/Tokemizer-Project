@@ -103,6 +103,19 @@ interface SettingsResponse {
   llm_profiles: LLMProfile[];
 }
 
+interface LLMOptimizationSubmitResponse {
+  job_id: string;
+  status: "queued" | "processing" | "completed" | "failed";
+}
+
+interface LLMOptimizationJobResponse {
+  job_id: string;
+  status: "queued" | "processing" | "completed" | "failed";
+  attempts: number;
+  result?: OptimizationApiResponse | null;
+  error_message?: string | null;
+}
+
 export function OptimizerPlayground() {
   const [input, setInput] = useState("");
   const [output, setOutput] = useState("");
@@ -250,6 +263,62 @@ export function OptimizerPlayground() {
           throw new Error("Custom canonicals must map non-empty strings to non-empty strings.");
         }
         payload.custom_canonicals = parsed;
+      }
+
+      if (optimizationTechnique === "llm_based") {
+        const submitResponse = await authFetch("/api/v1/optimize/async", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+
+        if (!submitResponse.ok) {
+          let detail = "Failed to submit async optimization job";
+          try {
+            const errorBody = await submitResponse.json() as { detail?: string };
+            if (typeof errorBody?.detail === "string" && errorBody.detail.trim()) {
+              detail = errorBody.detail;
+            }
+          } catch {
+            // keep default message
+          }
+          throw new Error(detail);
+        }
+
+        const submitPayload = await submitResponse.json() as LLMOptimizationSubmitResponse;
+        const jobId = submitPayload.job_id;
+        const pollAttemptsRaw = Number(import.meta.env.VITE_LLM_ASYNC_POLL_ATTEMPTS ?? 30);
+        const pollDelayRaw = Number(import.meta.env.VITE_LLM_ASYNC_POLL_DELAY_MS ?? 2000);
+        const maxAttempts = Number.isFinite(pollAttemptsRaw) ? Math.max(5, pollAttemptsRaw) : 30;
+        const delayMs = Number.isFinite(pollDelayRaw) ? Math.max(500, pollDelayRaw) : 2000;
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          const statusResponse = await authFetch(`/api/v1/optimize/jobs/${jobId}`);
+          if (!statusResponse.ok) {
+            let detail = "Failed to poll optimization job";
+            try {
+              const errorBody = await statusResponse.json() as { detail?: string };
+              if (typeof errorBody?.detail === "string" && errorBody.detail.trim()) {
+                detail = errorBody.detail;
+              }
+            } catch {
+              // keep default message
+            }
+            throw new Error(detail);
+          }
+
+          const job = await statusResponse.json() as LLMOptimizationJobResponse;
+          if (job.status === "completed" && job.result) {
+            return job.result;
+          }
+          if (job.status === "failed") {
+            throw new Error(job.error_message || "LLM async optimization failed");
+          }
+
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+
+        throw new Error("LLM async optimization timed out while waiting for result");
       }
 
       const url = "/api/v1/optimize";

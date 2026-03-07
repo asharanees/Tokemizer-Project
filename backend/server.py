@@ -1,4 +1,5 @@
 import hashlib
+import json
 import logging
 import os
 import struct
@@ -27,6 +28,7 @@ from database import (
     get_canonical_mappings_cache,
     get_customer_by_id,
     get_llm_profiles,
+    get_llm_optimization_job,
     get_llm_system_context,
     get_optimization_history_record,
     get_subscription_plan_by_id,
@@ -41,6 +43,8 @@ from database import (
     set_admin_setting,
     set_llm_profiles,
     set_llm_system_context,
+    create_llm_optimization_job,
+    update_llm_optimization_job,
     update_batch_job,
     update_canonical_mapping,
 )
@@ -62,6 +66,12 @@ except ImportError:
 
 
 from dotenv import load_dotenv
+
+try:
+    import boto3
+except Exception:  # pragma: no cover - boto3 may be absent in lightweight test envs
+    boto3 = None  # type: ignore[assignment]
+
 from fastapi import (
     APIRouter,
     BackgroundTasks,
@@ -107,6 +117,8 @@ from models.canonical_mapping import (
     CanonicalMappingUpdate,
 )
 from models.optimization import (
+    LLMOptimizationJobResponse,
+    LLMOptimizationSubmitResponse,
     OptimizationBatchResponse,
     OptimizationRequest,
     OptimizationResponse,
@@ -384,7 +396,10 @@ tags_metadata = [
 @asynccontextmanager
 async def _app_lifespan(_: FastAPI):
     startup_event()
-    yield
+    try:
+        yield
+    finally:
+        _llm_async_worker_stop.set()
 
 
 app = FastAPI(
@@ -1543,6 +1558,100 @@ async def get_current_usage(customer: Customer = Security(get_current_customer))
             ),
         },
     }
+
+
+@api_router.post(
+    "/optimize/async",
+    response_model=LLMOptimizationSubmitResponse,
+    status_code=202,
+    tags=["Optimizer"],
+    summary="Submit async LLM optimization job",
+    description=(
+        "Queue a single llm_based optimization request for asynchronous processing via SQS. "
+        "Use GET /api/v1/optimize/jobs/{job_id} to poll for completion."
+    ),
+)
+async def optimize_text_async(
+    request: OptimizationRequest,
+    customer: Customer = Depends(get_current_customer),
+):
+    if request.prompts:
+        raise HTTPException(
+            status_code=400,
+            detail="Async LLM optimization supports a single prompt only",
+        )
+    if request.optimization_technique != "llm_based":
+        raise HTTPException(
+            status_code=400,
+            detail="Async endpoint requires optimization_technique='llm_based'",
+        )
+    if not _llm_async_enabled():
+        raise HTTPException(status_code=503, detail="Async LLM optimization is disabled")
+    if not _get_llm_async_queue_url():
+        raise HTTPException(
+            status_code=503,
+            detail="Async LLM queue is not configured",
+        )
+
+    payload = request.model_dump(mode="json")
+    job = await run_in_threadpool(
+        create_llm_optimization_job,
+        customer_id=customer.id,
+        request_payload=payload,
+    )
+    try:
+        await run_in_threadpool(_enqueue_llm_optimization_job, job.id)
+    except Exception as exc:
+        await run_in_threadpool(
+            update_llm_optimization_job,
+            job.id,
+            customer_id=customer.id,
+            status="failed",
+            error_message=str(exc),
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to enqueue LLM optimization job",
+        ) from exc
+
+    track_usage(customer, count=1)
+    return LLMOptimizationSubmitResponse(job_id=job.id, status="queued")
+
+
+@api_router.get(
+    "/optimize/jobs/{job_id}",
+    response_model=LLMOptimizationJobResponse,
+    tags=["Optimizer"],
+    summary="Get async LLM optimization job status",
+)
+async def get_optimize_job_status(
+    job_id: str,
+    customer: Customer = Depends(get_current_customer),
+):
+    job = await run_in_threadpool(
+        get_llm_optimization_job, job_id, customer_id=customer.id
+    )
+    if not job:
+        raise HTTPException(status_code=404, detail="Optimization job not found")
+
+    result_model: Optional[OptimizationResponse] = None
+    if isinstance(job.result_payload, dict):
+        try:
+            result_model = OptimizationResponse(**job.result_payload)
+        except Exception:
+            result_model = None
+
+    return LLMOptimizationJobResponse(
+        job_id=job.id,
+        status=job.status,
+        attempts=job.attempts,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
+        completed_at=job.completed_at,
+        result=result_model,
+        error_message=job.error_message,
+    )
 
 
 @api_router.post(
@@ -2782,6 +2891,158 @@ logger = logging.getLogger(__name__)
 # Global executor pool for batch optimization (reused across requests)
 _batch_executor: Optional[ThreadPoolExecutor] = None
 _batch_executor_lock = threading.Lock()
+_llm_async_worker_thread: Optional[threading.Thread] = None
+_llm_async_worker_lock = threading.Lock()
+_llm_async_worker_stop = threading.Event()
+
+
+def _llm_async_enabled() -> bool:
+    return _env_truthy("LLM_OPTIMIZE_ASYNC_ENABLED", "true")
+
+
+def _get_llm_async_queue_url() -> str:
+    return os.environ.get("LLM_OPTIMIZE_SQS_QUEUE_URL", "").strip()
+
+
+def _get_sqs_client():
+    if boto3 is None:
+        raise RuntimeError("boto3 is unavailable for SQS operations")
+    region = (
+        os.environ.get("LLM_OPTIMIZE_SQS_REGION", "").strip()
+        or os.environ.get("AWS_REGION", "").strip()
+        or "us-east-1"
+    )
+    return boto3.client("sqs", region_name=region)
+
+
+def _enqueue_llm_optimization_job(job_id: str) -> None:
+    queue_url = _get_llm_async_queue_url()
+    if not queue_url:
+        raise RuntimeError("LLM_OPTIMIZE_SQS_QUEUE_URL is not configured")
+    client = _get_sqs_client()
+    message = {"job_id": job_id, "source": "tokemizer-backend"}
+    client.send_message(QueueUrl=queue_url, MessageBody=json.dumps(message))
+
+
+def _process_llm_optimization_job(job_id: str) -> None:
+    job = get_llm_optimization_job(job_id)
+    if not job:
+        return
+    if job.status in {"completed", "failed"}:
+        return
+
+    attempts = int(job.attempts or 0) + 1
+    update_llm_optimization_job(
+        job_id,
+        status="processing",
+        attempts=attempts,
+        error_message="",
+    )
+
+    try:
+        payload = dict(job.request_payload)
+        request = OptimizationRequest(**payload)
+        if not request.prompt:
+            raise ValueError("Async LLM optimization requires a single prompt")
+        if request.optimization_technique != "llm_based":
+            raise ValueError("Async queue supports only llm_based optimization")
+
+        result = _optimize_single_llm(request.prompt, request)
+        update_llm_optimization_job(
+            job_id,
+            status="completed",
+            result_payload=result.model_dump(),
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+    except Exception as exc:
+        logger.exception("Async LLM job %s failed", job_id)
+        update_llm_optimization_job(
+            job_id,
+            status="failed",
+            error_message=str(exc),
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+
+def _llm_async_worker_loop() -> None:
+    queue_url = _get_llm_async_queue_url()
+    if not queue_url:
+        logger.warning("LLM async worker disabled: missing LLM_OPTIMIZE_SQS_QUEUE_URL")
+        return
+
+    try:
+        client = _get_sqs_client()
+    except Exception as exc:
+        logger.warning("LLM async worker disabled: failed to init SQS client (%s)", exc)
+        return
+
+    wait_seconds_raw = os.environ.get("LLM_OPTIMIZE_SQS_WAIT_SECONDS", "10").strip()
+    visibility_raw = os.environ.get("LLM_OPTIMIZE_SQS_VISIBILITY_TIMEOUT", "120").strip()
+    try:
+        wait_seconds = max(1, min(int(wait_seconds_raw), 20))
+    except (TypeError, ValueError):
+        wait_seconds = 10
+    try:
+        visibility_timeout = max(30, min(int(visibility_raw), 900))
+    except (TypeError, ValueError):
+        visibility_timeout = 120
+
+    logger.info("LLM async worker started (queue=%s)", queue_url)
+    while not _llm_async_worker_stop.is_set():
+        try:
+            response = client.receive_message(
+                QueueUrl=queue_url,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=wait_seconds,
+                VisibilityTimeout=visibility_timeout,
+            )
+            messages = response.get("Messages", [])
+            if not messages:
+                continue
+
+            message = messages[0]
+            receipt_handle = message.get("ReceiptHandle")
+            body_raw = message.get("Body", "")
+            job_id = None
+            try:
+                payload = json.loads(body_raw)
+                if isinstance(payload, dict):
+                    candidate = payload.get("job_id")
+                    if isinstance(candidate, str) and candidate.strip():
+                        job_id = candidate.strip()
+            except Exception:
+                job_id = None
+
+            if job_id:
+                _process_llm_optimization_job(job_id)
+            else:
+                logger.warning("Received invalid LLM async queue payload: %s", body_raw)
+
+            if receipt_handle:
+                client.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
+        except Exception:
+            logger.exception("LLM async worker loop error")
+            time.sleep(1.0)
+
+    logger.info("LLM async worker stopped")
+
+
+def _start_llm_async_worker() -> None:
+    global _llm_async_worker_thread
+    if not _llm_async_enabled():
+        logger.info("LLM async worker disabled by LLM_OPTIMIZE_ASYNC_ENABLED")
+        return
+
+    with _llm_async_worker_lock:
+        if _llm_async_worker_thread and _llm_async_worker_thread.is_alive():
+            return
+        _llm_async_worker_stop.clear()
+        _llm_async_worker_thread = threading.Thread(
+            target=_llm_async_worker_loop,
+            name="llm-async-worker",
+            daemon=True,
+        )
+        _llm_async_worker_thread.start()
 
 
 def _run_model_preparation_worker(
@@ -2945,6 +3206,8 @@ def startup_event() -> None:
         daemon=True,
     )
     thread.start()
+
+    _start_llm_async_worker()
 
 
 def _run_startup_model_tasks() -> None:
