@@ -41,6 +41,13 @@ def _resolve_ollama_retry_count() -> int:
     return max(1, min(parsed, 2))
 
 
+def _resolve_ollama_keep_alive() -> str | None:
+    raw_value = os.getenv("LLM_OLLAMA_KEEP_ALIVE", "30m").strip()
+    if not raw_value:
+        return None
+    return raw_value
+
+
 @dataclass
 class LLMResult:
     text: str
@@ -324,6 +331,7 @@ def _call_ollama(model: str, prompt: str, api_key: str) -> LLMResult:
     url = f"{base_url}/api/chat"
     timeout_seconds = _resolve_ollama_timeout_seconds()
     max_attempts = _resolve_ollama_retry_count()
+    keep_alive = _resolve_ollama_keep_alive()
 
     last_error: LLMProviderError | None = None
     for attempt in range(1, max_attempts + 1):
@@ -335,6 +343,7 @@ def _call_ollama(model: str, prompt: str, api_key: str) -> LLMResult:
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
+                    **({"keep_alive": keep_alive} if keep_alive else {}),
                 },
                 timeout_seconds=timeout_seconds,
             )

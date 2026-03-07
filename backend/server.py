@@ -6,6 +6,8 @@ import struct
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -2894,6 +2896,8 @@ _batch_executor_lock = threading.Lock()
 _llm_async_worker_thread: Optional[threading.Thread] = None
 _llm_async_worker_lock = threading.Lock()
 _llm_async_worker_stop = threading.Event()
+_ollama_keepalive_thread: Optional[threading.Thread] = None
+_ollama_keepalive_lock = threading.Lock()
 
 
 def _llm_async_enabled() -> bool:
@@ -3043,6 +3047,100 @@ def _start_llm_async_worker() -> None:
             daemon=True,
         )
         _llm_async_worker_thread.start()
+
+
+def _resolve_ollama_runtime_base_url() -> str:
+    return (
+        os.environ.get("LLM_OPTIMIZER_OLLAMA_BASE_URL", "").strip()
+        or os.environ.get("OLLAMA_BASE_URL", "").strip()
+        or "http://localhost:11434"
+    ).rstrip("/")
+
+
+def _resolve_ollama_runtime_model() -> str:
+    return os.environ.get("LLM_OPTIMIZER_MODEL", "tokemizer-q4_k_m").strip() or "tokemizer-q4_k_m"
+
+
+def _send_ollama_keepalive_ping(timeout_seconds: int = 20) -> bool:
+    base_url = _resolve_ollama_runtime_base_url()
+    model = _resolve_ollama_runtime_model()
+    keep_alive = os.environ.get("LLM_OLLAMA_KEEP_ALIVE", "30m").strip() or "30m"
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "Reply exactly: OK"}],
+        "stream": False,
+        "keep_alive": keep_alive,
+    }
+    request = urllib.request.Request(
+        url=f"{base_url}/api/chat",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            if int(getattr(response, "status", 200) or 200) >= 400:
+                return False
+            response.read(1024)
+            return True
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return False
+
+
+def _ollama_keepalive_worker_loop() -> None:
+    interval_raw = os.environ.get("LLM_OLLAMA_KEEPALIVE_INTERVAL_SECONDS", "300").strip()
+    timeout_raw = os.environ.get("LLM_OLLAMA_KEEPALIVE_TIMEOUT_SECONDS", "20").strip()
+    try:
+        interval_seconds = max(30, min(int(interval_raw), 3600))
+    except (TypeError, ValueError):
+        interval_seconds = 300
+    try:
+        timeout_seconds = max(5, min(int(timeout_raw), 60))
+    except (TypeError, ValueError):
+        timeout_seconds = 20
+
+    startup_ok = _send_ollama_keepalive_ping(timeout_seconds=timeout_seconds)
+    if startup_ok:
+        logger.info("Ollama warm call completed successfully")
+    else:
+        logger.warning("Ollama warm call failed; will continue keepalive attempts")
+
+    while not _llm_async_worker_stop.wait(interval_seconds):
+        ok = _send_ollama_keepalive_ping(timeout_seconds=timeout_seconds)
+        if not ok:
+            logger.warning("Ollama keepalive ping failed")
+
+
+def _start_ollama_keepalive_worker() -> None:
+    global _ollama_keepalive_thread
+
+    provider = os.environ.get("LLM_OPTIMIZER_PROVIDER", "ollama").strip().lower() or "ollama"
+    if provider != "ollama":
+        return
+
+    warm_enabled = _env_truthy("LLM_OLLAMA_WARM_ON_STARTUP", "true")
+    heartbeat_enabled = _env_truthy("LLM_OLLAMA_KEEPALIVE_ENABLED", "true")
+    if not warm_enabled and not heartbeat_enabled:
+        logger.info("Ollama warm/keepalive disabled by environment")
+        return
+
+    if warm_enabled and not heartbeat_enabled:
+        ok = _send_ollama_keepalive_ping()
+        if ok:
+            logger.info("Ollama warm call completed successfully")
+        else:
+            logger.warning("Ollama warm call failed")
+        return
+
+    with _ollama_keepalive_lock:
+        if _ollama_keepalive_thread and _ollama_keepalive_thread.is_alive():
+            return
+        _ollama_keepalive_thread = threading.Thread(
+            target=_ollama_keepalive_worker_loop,
+            name="ollama-keepalive-worker",
+            daemon=True,
+        )
+        _ollama_keepalive_thread.start()
 
 
 def _run_model_preparation_worker(
@@ -3208,6 +3306,7 @@ def startup_event() -> None:
     thread.start()
 
     _start_llm_async_worker()
+    _start_ollama_keepalive_worker()
 
 
 def _run_startup_model_tasks() -> None:
