@@ -29,6 +29,7 @@ app.db
 *.tmp
 *.bak
 download_log.txt
+.tmp_*
 
 # Node/React
 node_modules/

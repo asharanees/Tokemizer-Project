@@ -24,12 +24,12 @@ def _resolve_provider_timeout_seconds() -> int:
 def _resolve_ollama_timeout_seconds() -> int:
     raw_value = os.getenv("LLM_PROVIDER_TIMEOUT_SECONDS_OLLAMA", "").strip()
     if not raw_value:
-        raw_value = os.getenv("LLM_PROVIDER_TIMEOUT_SECONDS", "20").strip()
+        raw_value = os.getenv("LLM_PROVIDER_TIMEOUT_SECONDS", "26").strip()
     try:
         parsed = int(raw_value)
     except (TypeError, ValueError):
-        return 20
-    return max(5, min(parsed, 25))
+        return 26
+    return max(5, min(parsed, 28))
 
 
 def _resolve_ollama_retry_count() -> int:
