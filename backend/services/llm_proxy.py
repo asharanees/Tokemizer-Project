@@ -29,7 +29,7 @@ def _resolve_ollama_timeout_seconds() -> int:
         parsed = int(raw_value)
     except (TypeError, ValueError):
         return 26
-    return max(5, min(parsed, 28))
+    return max(5, min(parsed, 600))
 
 
 def _resolve_ollama_retry_count() -> int:
@@ -46,6 +46,15 @@ def _resolve_ollama_keep_alive() -> str | None:
     if not raw_value:
         return None
     return raw_value
+
+
+def _resolve_ollama_num_predict() -> int:
+    raw_value = os.getenv("LLM_OLLAMA_NUM_PREDICT", "256").strip()
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        return 256
+    return max(64, min(parsed, 1024))
 
 
 @dataclass
@@ -332,6 +341,7 @@ def _call_ollama(model: str, prompt: str, api_key: str) -> LLMResult:
     timeout_seconds = _resolve_ollama_timeout_seconds()
     max_attempts = _resolve_ollama_retry_count()
     keep_alive = _resolve_ollama_keep_alive()
+    num_predict = _resolve_ollama_num_predict()
 
     last_error: LLMProviderError | None = None
     for attempt in range(1, max_attempts + 1):
@@ -343,6 +353,7 @@ def _call_ollama(model: str, prompt: str, api_key: str) -> LLMResult:
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
+                    "options": {"num_predict": num_predict},
                     **({"keep_alive": keep_alive} if keep_alive else {}),
                 },
                 timeout_seconds=timeout_seconds,
