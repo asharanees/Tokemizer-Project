@@ -2371,6 +2371,77 @@ def update_llm_optimization_job(
     return get_llm_optimization_job(job_id, customer_id=customer_id)
 
 
+def reap_stale_llm_optimization_jobs(
+    *,
+    stale_processing_before: Optional[str] = None,
+    stale_queued_before: Optional[str] = None,
+    processing_error_message: Optional[str] = None,
+    queued_error_message: Optional[str] = None,
+) -> Dict[str, int]:
+    """Mark stale async LLM jobs as failed and return affected row counts."""
+    init_db()
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    processing_message = (
+        processing_error_message
+        or "Async optimization timed out while processing; job reaped as stale"
+    )
+    queued_message = (
+        queued_error_message
+        or "Async optimization expired in queue; job reaped as stale"
+    )
+
+    processing_reaped = 0
+    queued_reaped = 0
+
+    with get_db() as conn:
+        if stale_processing_before:
+            cursor = conn.execute(
+                """
+                UPDATE llm_optimization_jobs
+                SET
+                    status = 'failed',
+                    error_message = ?,
+                    updated_at = ?,
+                    completed_at = ?
+                WHERE status = 'processing' AND updated_at < ?
+                """,
+                (
+                    processing_message,
+                    now_iso,
+                    now_iso,
+                    stale_processing_before,
+                ),
+            )
+            processing_reaped = int(cursor.rowcount or 0)
+
+        if stale_queued_before:
+            cursor = conn.execute(
+                """
+                UPDATE llm_optimization_jobs
+                SET
+                    status = 'failed',
+                    error_message = ?,
+                    updated_at = ?,
+                    completed_at = ?
+                WHERE status = 'queued' AND created_at < ?
+                """,
+                (
+                    queued_message,
+                    now_iso,
+                    now_iso,
+                    stale_queued_before,
+                ),
+            )
+            queued_reaped = int(cursor.rowcount or 0)
+
+    return {
+        "processing_reaped": processing_reaped,
+        "queued_reaped": queued_reaped,
+        "total_reaped": processing_reaped + queued_reaped,
+    }
+
+
 # ============================================================================
 # Performance Telemetry System
 # ============================================================================

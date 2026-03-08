@@ -41,6 +41,7 @@ from database import (
     list_canonical_mappings,
     list_recent_history,
     list_recent_telemetry,
+    reap_stale_llm_optimization_jobs,
     record_optimization_history,
     set_admin_setting,
     set_llm_profiles,
@@ -226,6 +227,15 @@ except Exception:  # pragma: no cover
 
 def _env_truthy(name: str, default: str = "false") -> bool:
     return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
+    raw_value = os.environ.get(name, str(default)).strip()
+    try:
+        parsed = int(raw_value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
 
 
 def _format_bytes(value: int) -> str:
@@ -2062,6 +2072,45 @@ def _optimize_single_llm(
     if provider == "ollama" and not api_key:
         api_key = os.getenv("LLM_OPTIMIZER_OLLAMA_BASE_URL", "").strip()
 
+    max_input_chars = _env_int(
+        "LLM_OPTIMIZER_MAX_INPUT_CHARS",
+        120000,
+        minimum=2000,
+        maximum=1000000,
+    )
+    max_input_tokens = _env_int(
+        "LLM_OPTIMIZER_MAX_INPUT_TOKENS",
+        30000,
+        minimum=1000,
+        maximum=200000,
+    )
+    max_composed_tokens = _env_int(
+        "LLM_OPTIMIZER_MAX_COMPOSED_TOKENS",
+        45000,
+        minimum=1500,
+        maximum=240000,
+    )
+
+    prompt_char_len = len(prompt)
+    if prompt_char_len > max_input_chars:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Prompt too large for LLM async optimization ({prompt_char_len} chars > "
+                f"limit {max_input_chars})."
+            ),
+        )
+
+    prompt_token_estimate = optimizer.count_tokens(prompt)
+    if prompt_token_estimate > max_input_tokens:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Prompt too large for LLM async optimization (~{prompt_token_estimate} tokens > "
+                f"limit {max_input_tokens})."
+            ),
+        )
+
     user_prompt_parts: List[str] = [
         f"Optimization mode: {request.optimization_mode}",
         "Input:",
@@ -2073,6 +2122,15 @@ def _optimize_single_llm(
 
     system_context = get_llm_system_context()
     composed_prompt = f"System Context:\n{system_context}\n\nUser Prompt:\n{user_prompt}"
+    composed_token_estimate = optimizer.count_tokens(composed_prompt)
+    if composed_token_estimate > max_composed_tokens:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Composed LLM request is too large (~{composed_token_estimate} tokens > "
+                f"limit {max_composed_tokens})."
+            ),
+        )
 
     with tracing_service.start_span(
         "llm.optimize.single",
@@ -2081,6 +2139,8 @@ def _optimize_single_llm(
             "llm.provider": provider,
             "llm.model": model,
             "prompt.input_chars": len(prompt),
+            "prompt.input_tokens_estimate": prompt_token_estimate,
+            "prompt.composed_tokens_estimate": composed_token_estimate,
         },
     ):
         try:
@@ -3056,6 +3116,102 @@ def _process_llm_optimization_job(job_id: str) -> None:
             )
 
 
+def _reap_stale_llm_jobs_if_needed(*, force: bool = False) -> None:
+    if not _env_truthy("LLM_OPTIMIZE_STALE_REAPER_ENABLED", "true"):
+        return
+
+    processing_seconds = _env_int(
+        "LLM_OPTIMIZE_STALE_PROCESSING_SECONDS",
+        3600,
+        minimum=120,
+        maximum=172800,
+    )
+    queued_seconds = _env_int(
+        "LLM_OPTIMIZE_STALE_QUEUED_SECONDS",
+        21600,
+        minimum=300,
+        maximum=604800,
+    )
+
+    if processing_seconds <= 0 and queued_seconds <= 0:
+        return
+
+    now = datetime.now(timezone.utc)
+    processing_before = (
+        (now - timedelta(seconds=processing_seconds)).isoformat()
+        if processing_seconds > 0
+        else None
+    )
+    queued_before = (
+        (now - timedelta(seconds=queued_seconds)).isoformat()
+        if queued_seconds > 0
+        else None
+    )
+
+    reaped = reap_stale_llm_optimization_jobs(
+        stale_processing_before=processing_before,
+        stale_queued_before=queued_before,
+        processing_error_message=(
+            f"Stale async job reaped after >{processing_seconds}s in processing"
+        ),
+        queued_error_message=(
+            f"Stale async job reaped after >{queued_seconds}s in queued"
+        ),
+    )
+    total = int(reaped.get("total_reaped") or 0)
+    if total > 0 or force:
+        logger.info(
+            "LLM stale-job reaper: processing=%s queued=%s total=%s",
+            reaped.get("processing_reaped", 0),
+            reaped.get("queued_reaped", 0),
+            total,
+        )
+
+
+def _process_llm_queue_message(*, client: Any, queue_url: str, message: Dict[str, Any]) -> None:
+    receipt_handle = message.get("ReceiptHandle")
+    body_raw = message.get("Body", "")
+    job_id: Optional[str] = None
+    try:
+        payload = json.loads(body_raw)
+        if isinstance(payload, dict):
+            candidate = payload.get("job_id")
+            if isinstance(candidate, str) and candidate.strip():
+                job_id = candidate.strip()
+    except Exception:
+        job_id = None
+
+    try:
+        if job_id:
+            trace_context = _trace_context_from_message_attributes(
+                message.get("MessageAttributes")
+            )
+            extracted_ctx = tracing_service.extract_context_from_carrier(trace_context)
+            token = tracing_service.attach_context(extracted_ctx)
+            try:
+                with tracing_service.start_span(
+                    "sqs.receive.process",
+                    kind=tracing_service.SpanKind.CONSUMER,
+                    attributes={
+                        "messaging.system": "aws.sqs",
+                        "messaging.destination": queue_url,
+                        "messaging.operation": "process",
+                        "job.id": job_id,
+                    },
+                ):
+                    _process_llm_optimization_job(job_id)
+            finally:
+                tracing_service.detach_context(token)
+        else:
+            logger.warning("Received invalid LLM async queue payload: %s", body_raw)
+    finally:
+        if receipt_handle:
+            try:
+                client.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
+            except Exception:
+                logger.exception("Failed to delete SQS message for job=%s", job_id)
+
+
 def _llm_async_worker_loop() -> None:
     queue_url = _get_llm_async_queue_url()
     if not queue_url:
@@ -3079,61 +3235,72 @@ def _llm_async_worker_loop() -> None:
     except (TypeError, ValueError):
         visibility_timeout = 120
 
-    logger.info("LLM async worker started (queue=%s)", queue_url)
-    while not _llm_async_worker_stop.is_set():
-        try:
-            response = client.receive_message(
-                QueueUrl=queue_url,
-                MaxNumberOfMessages=1,
-                WaitTimeSeconds=wait_seconds,
-                VisibilityTimeout=visibility_timeout,
-                MessageAttributeNames=["All"],
-            )
-            messages = response.get("Messages", [])
-            if not messages:
-                continue
+    worker_concurrency = _env_int(
+        "LLM_OPTIMIZE_WORKER_CONCURRENCY",
+        1,
+        minimum=1,
+        maximum=8,
+    )
+    reaper_interval_seconds = _env_int(
+        "LLM_OPTIMIZE_REAPER_INTERVAL_SECONDS",
+        60,
+        minimum=10,
+        maximum=600,
+    )
 
-            message = messages[0]
-            receipt_handle = message.get("ReceiptHandle")
-            body_raw = message.get("Body", "")
-            job_id = None
+    logger.info(
+        "LLM async worker started (queue=%s, concurrency=%s)",
+        queue_url,
+        worker_concurrency,
+    )
+
+    _reap_stale_llm_jobs_if_needed(force=True)
+    last_reaper_run = time.monotonic()
+
+    with ThreadPoolExecutor(max_workers=worker_concurrency) as worker_pool:
+        in_flight: List[Any] = []
+        while not _llm_async_worker_stop.is_set():
             try:
-                payload = json.loads(body_raw)
-                if isinstance(payload, dict):
-                    candidate = payload.get("job_id")
-                    if isinstance(candidate, str) and candidate.strip():
-                        job_id = candidate.strip()
-            except Exception:
-                job_id = None
+                now_monotonic = time.monotonic()
+                if now_monotonic - last_reaper_run >= reaper_interval_seconds:
+                    _reap_stale_llm_jobs_if_needed()
+                    last_reaper_run = now_monotonic
 
-            if job_id:
-                trace_context = _trace_context_from_message_attributes(
-                    message.get("MessageAttributes")
+                in_flight = [future for future in in_flight if not future.done()]
+                available_slots = worker_concurrency - len(in_flight)
+                if available_slots <= 0:
+                    time.sleep(0.1)
+                    continue
+
+                response = client.receive_message(
+                    QueueUrl=queue_url,
+                    MaxNumberOfMessages=min(10, available_slots),
+                    WaitTimeSeconds=wait_seconds,
+                    VisibilityTimeout=visibility_timeout,
+                    MessageAttributeNames=["All"],
                 )
-                extracted_ctx = tracing_service.extract_context_from_carrier(trace_context)
-                token = tracing_service.attach_context(extracted_ctx)
-                try:
-                    with tracing_service.start_span(
-                        "sqs.receive.process",
-                        kind=tracing_service.SpanKind.CONSUMER,
-                        attributes={
-                            "messaging.system": "aws.sqs",
-                            "messaging.destination": queue_url,
-                            "messaging.operation": "process",
-                            "job.id": job_id,
-                        },
-                    ):
-                        _process_llm_optimization_job(job_id)
-                finally:
-                    tracing_service.detach_context(token)
-            else:
-                logger.warning("Received invalid LLM async queue payload: %s", body_raw)
+                messages = response.get("Messages", [])
+                if not messages:
+                    continue
 
-            if receipt_handle:
-                client.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
-        except Exception:
-            logger.exception("LLM async worker loop error")
-            time.sleep(1.0)
+                for message in messages:
+                    in_flight.append(
+                        worker_pool.submit(
+                            _process_llm_queue_message,
+                            client=client,
+                            queue_url=queue_url,
+                            message=message,
+                        )
+                    )
+            except Exception:
+                logger.exception("LLM async worker loop error")
+                time.sleep(1.0)
+
+        for future in in_flight:
+            try:
+                future.result(timeout=5)
+            except Exception:
+                logger.exception("LLM async worker task failed during shutdown")
 
     logger.info("LLM async worker stopped")
 
