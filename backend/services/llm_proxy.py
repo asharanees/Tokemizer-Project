@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Tuple
 
 import requests
+from services import tracing as tracing_service
 
 
 class LLMProviderError(Exception):
@@ -171,14 +172,25 @@ def _post_json(
     timeout_seconds: int | None = None,
 ) -> Tuple[Dict[str, Any] | None, float]:
     started_at = time.perf_counter()
+    request_headers = dict(headers)
+    tracing_service.inject_context_to_headers(request_headers)
+
     try:
-        response = requests.post(
-            url,
-            headers=headers,
-            json=payload,
-            params=params,
-            timeout=timeout_seconds or _resolve_provider_timeout_seconds(),
-        )
+        with tracing_service.start_span(
+            "llm.http.post",
+            kind=tracing_service.SpanKind.CLIENT,
+            attributes={
+                "http.method": "POST",
+                "http.url": url,
+            },
+        ):
+            response = requests.post(
+                url,
+                headers=request_headers,
+                json=payload,
+                params=params,
+                timeout=timeout_seconds or _resolve_provider_timeout_seconds(),
+            )
     except requests.RequestException as exc:  # pragma: no cover - network failures
         raise LLMProviderError("Network request to provider failed") from exc
 

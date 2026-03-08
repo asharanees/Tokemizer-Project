@@ -80,6 +80,7 @@ from fastapi import (
     Depends,
     FastAPI,
     HTTPException,
+    Request,
     Security,
 )
 from fastapi.concurrency import run_in_threadpool
@@ -145,6 +146,7 @@ from routers.admin_routes import (
 from services import logging_control
 from services.billing import create_checkout_session, create_stripe_customer
 from services.llm_proxy import LLMProviderError, LLMResult, call_llm, get_llm_providers
+from services import tracing as tracing_service
 from services.model_cache_manager import ensure_models_cached, resolve_hf_home
 from services.optimizer import config as optimizer_config
 from services.optimizer import optimizer
@@ -1602,7 +1604,11 @@ async def optimize_text_async(
         request_payload=payload,
     )
     try:
-        await run_in_threadpool(_enqueue_llm_optimization_job, job.id)
+        await run_in_threadpool(
+            _enqueue_llm_optimization_job,
+            job.id,
+            tracing_service.inject_context_to_carrier(),
+        )
     except Exception as exc:
         await run_in_threadpool(
             update_llm_optimization_job,
@@ -2068,12 +2074,29 @@ def _optimize_single_llm(
     system_context = get_llm_system_context()
     composed_prompt = f"System Context:\n{system_context}\n\nUser Prompt:\n{user_prompt}"
 
-    try:
-        llm_result = call_llm(provider, model, composed_prompt, api_key)
-    except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
-    except LLMProviderError as error:
-        raise HTTPException(status_code=502, detail=str(error)) from error
+    with tracing_service.start_span(
+        "llm.optimize.single",
+        kind=tracing_service.SpanKind.INTERNAL,
+        attributes={
+            "llm.provider": provider,
+            "llm.model": model,
+            "prompt.input_chars": len(prompt),
+        },
+    ):
+        try:
+            with tracing_service.start_span(
+                "llm.call",
+                kind=tracing_service.SpanKind.CLIENT,
+                attributes={
+                    "llm.provider": provider,
+                    "llm.model": model,
+                },
+            ):
+                llm_result = call_llm(provider, model, composed_prompt, api_key)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
+        except LLMProviderError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
 
     optimized_output = (llm_result.text or "").strip()
     if not optimized_output:
@@ -2828,14 +2851,28 @@ if FRONTEND_DIST.exists():
 
 # Middleware to ensure UTF-8 encoding for all responses
 @app.middleware("http")
-async def add_utf8_charset(request, call_next):
+async def add_utf8_charset(request: Request, call_next):
     """
     Ensure all responses use UTF-8 charset.
 
     Preserves any additional Content-Type parameters (e.g., profile, boundary)
     while ensuring charset=utf-8 is set or updated for JSON responses.
     """
-    response = await call_next(request)
+    extracted_ctx = tracing_service.extract_context_from_headers(request.headers)
+    token = tracing_service.attach_context(extracted_ctx)
+
+    try:
+        with tracing_service.start_span(
+            "http.request",
+            kind=tracing_service.SpanKind.SERVER,
+            attributes={
+                "http.method": request.method,
+                "http.target": request.url.path,
+            },
+        ):
+            response = await call_next(request)
+    finally:
+        tracing_service.detach_context(token)
     content_type = response.headers.get("content-type", "")
 
     # Only modify JSON responses
@@ -2919,53 +2956,104 @@ def _get_sqs_client():
     return boto3.client("sqs", region_name=region)
 
 
-def _enqueue_llm_optimization_job(job_id: str) -> None:
+def _message_attributes_from_trace_context(trace_context: Optional[Dict[str, str]]) -> Dict[str, Dict[str, str]]:
+    if not trace_context:
+        return {}
+    attrs: Dict[str, Dict[str, str]] = {}
+    traceparent = trace_context.get("traceparent", "").strip()
+    tracestate = trace_context.get("tracestate", "").strip()
+    if traceparent:
+        attrs["traceparent"] = {"StringValue": traceparent, "DataType": "String"}
+    if tracestate:
+        attrs["tracestate"] = {"StringValue": tracestate, "DataType": "String"}
+    return attrs
+
+
+def _trace_context_from_message_attributes(attrs: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    if not isinstance(attrs, dict):
+        return {}
+    out: Dict[str, str] = {}
+    traceparent = str(attrs.get("traceparent", {}).get("StringValue", "")).strip()
+    tracestate = str(attrs.get("tracestate", {}).get("StringValue", "")).strip()
+    if traceparent:
+        out["traceparent"] = traceparent
+    if tracestate:
+        out["tracestate"] = tracestate
+    return out
+
+
+def _enqueue_llm_optimization_job(
+    job_id: str,
+    trace_context: Optional[Dict[str, str]] = None,
+) -> None:
     queue_url = _get_llm_async_queue_url()
     if not queue_url:
         raise RuntimeError("LLM_OPTIMIZE_SQS_QUEUE_URL is not configured")
     client = _get_sqs_client()
     message = {"job_id": job_id, "source": "tokemizer-backend"}
-    client.send_message(QueueUrl=queue_url, MessageBody=json.dumps(message))
+    attrs = _message_attributes_from_trace_context(trace_context)
+    with tracing_service.start_span(
+        "sqs.send_message",
+        kind=tracing_service.SpanKind.CLIENT,
+        attributes={
+            "messaging.system": "aws.sqs",
+            "messaging.destination": queue_url,
+            "messaging.operation": "send",
+            "job.id": job_id,
+        },
+    ):
+        send_kwargs: Dict[str, Any] = {
+            "QueueUrl": queue_url,
+            "MessageBody": json.dumps(message),
+        }
+        if attrs:
+            send_kwargs["MessageAttributes"] = attrs
+        client.send_message(**send_kwargs)
 
 
 def _process_llm_optimization_job(job_id: str) -> None:
-    job = get_llm_optimization_job(job_id)
-    if not job:
-        return
-    if job.status in {"completed", "failed"}:
-        return
+    with tracing_service.start_span(
+        "llm.job.process",
+        kind=tracing_service.SpanKind.INTERNAL,
+        attributes={"job.id": job_id},
+    ):
+        job = get_llm_optimization_job(job_id)
+        if not job:
+            return
+        if job.status in {"completed", "failed"}:
+            return
 
-    attempts = int(job.attempts or 0) + 1
-    update_llm_optimization_job(
-        job_id,
-        status="processing",
-        attempts=attempts,
-        error_message="",
-    )
-
-    try:
-        payload = dict(job.request_payload)
-        request = OptimizationRequest(**payload)
-        if not request.prompt:
-            raise ValueError("Async LLM optimization requires a single prompt")
-        if request.optimization_technique != "llm_based":
-            raise ValueError("Async queue supports only llm_based optimization")
-
-        result = _optimize_single_llm(request.prompt, request)
+        attempts = int(job.attempts or 0) + 1
         update_llm_optimization_job(
             job_id,
-            status="completed",
-            result_payload=result.model_dump(),
-            completed_at=datetime.now(timezone.utc).isoformat(),
+            status="processing",
+            attempts=attempts,
+            error_message="",
         )
-    except Exception as exc:
-        logger.exception("Async LLM job %s failed", job_id)
-        update_llm_optimization_job(
-            job_id,
-            status="failed",
-            error_message=str(exc),
-            completed_at=datetime.now(timezone.utc).isoformat(),
-        )
+
+        try:
+            payload = dict(job.request_payload)
+            request = OptimizationRequest(**payload)
+            if not request.prompt:
+                raise ValueError("Async LLM optimization requires a single prompt")
+            if request.optimization_technique != "llm_based":
+                raise ValueError("Async queue supports only llm_based optimization")
+
+            result = _optimize_single_llm(request.prompt, request)
+            update_llm_optimization_job(
+                job_id,
+                status="completed",
+                result_payload=result.model_dump(),
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as exc:
+            logger.exception("Async LLM job %s failed", job_id)
+            update_llm_optimization_job(
+                job_id,
+                status="failed",
+                error_message=str(exc),
+                completed_at=datetime.now(timezone.utc).isoformat(),
+            )
 
 
 def _llm_async_worker_loop() -> None:
@@ -2999,6 +3087,7 @@ def _llm_async_worker_loop() -> None:
                 MaxNumberOfMessages=1,
                 WaitTimeSeconds=wait_seconds,
                 VisibilityTimeout=visibility_timeout,
+                MessageAttributeNames=["All"],
             )
             messages = response.get("Messages", [])
             if not messages:
@@ -3018,7 +3107,25 @@ def _llm_async_worker_loop() -> None:
                 job_id = None
 
             if job_id:
-                _process_llm_optimization_job(job_id)
+                trace_context = _trace_context_from_message_attributes(
+                    message.get("MessageAttributes")
+                )
+                extracted_ctx = tracing_service.extract_context_from_carrier(trace_context)
+                token = tracing_service.attach_context(extracted_ctx)
+                try:
+                    with tracing_service.start_span(
+                        "sqs.receive.process",
+                        kind=tracing_service.SpanKind.CONSUMER,
+                        attributes={
+                            "messaging.system": "aws.sqs",
+                            "messaging.destination": queue_url,
+                            "messaging.operation": "process",
+                            "job.id": job_id,
+                        },
+                    ):
+                        _process_llm_optimization_job(job_id)
+                finally:
+                    tracing_service.detach_context(token)
             else:
                 logger.warning("Received invalid LLM async queue payload: %s", body_raw)
 
@@ -3275,6 +3382,7 @@ def _get_batch_executor() -> ThreadPoolExecutor:
 
 
 def startup_event() -> None:
+    tracing_service.configure_tracing("tokemizer-backend")
     init_db()
 
     # Apply saved admin settings
