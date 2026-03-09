@@ -287,10 +287,13 @@ export function OptimizerPlayground() {
 
         const submitPayload = await submitResponse.json() as LLMOptimizationSubmitResponse;
         const jobId = submitPayload.job_id;
-        const pollAttemptsRaw = Number(import.meta.env.VITE_LLM_ASYNC_POLL_ATTEMPTS ?? 30);
+        const pollAttemptsRaw = Number(import.meta.env.VITE_LLM_ASYNC_POLL_ATTEMPTS ?? 240);
         const pollDelayRaw = Number(import.meta.env.VITE_LLM_ASYNC_POLL_DELAY_MS ?? 2000);
-        const maxAttempts = Number.isFinite(pollAttemptsRaw) ? Math.max(5, pollAttemptsRaw) : 30;
+        const maxAttempts = Number.isFinite(pollAttemptsRaw)
+          ? Math.max(30, pollAttemptsRaw)
+          : 240;
         const delayMs = Number.isFinite(pollDelayRaw) ? Math.max(500, pollDelayRaw) : 2000;
+        const maxWaitSeconds = Math.floor((maxAttempts * delayMs) / 1000);
 
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           const statusResponse = await authFetch(`/api/v1/optimize/jobs/${jobId}`);
@@ -318,7 +321,9 @@ export function OptimizerPlayground() {
           await new Promise((resolve) => setTimeout(resolve, delayMs));
         }
 
-        throw new Error("LLM async optimization timed out while waiting for result");
+        throw new Error(
+          `LLM async optimization timed out while waiting for result (~${maxWaitSeconds}s)`
+        );
       }
 
       const url = "/api/v1/optimize";
