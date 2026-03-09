@@ -1,4 +1,4 @@
-# AWS Current Inventory (2026-03-04)
+# AWS Current Inventory (2026-03-10)
 
 Region: `us-east-1`
 Account: `980874804229`
@@ -109,6 +109,17 @@ Account: `980874804229`
 - This inventory reflects the state after cleanup of duplicate Tokemizer APIs, VPC links, ALBs, and orphan target groups.
 - Health check through active API returns `200 OK`:
   - `https://d01boo3jka.execute-api.us-east-1.amazonaws.com/prod/api/v1/health`
+
+### 2026-03-10 operational validation updates
+
+The production backend host (`i-0091e5c28f3715e0d`) was actively exercised through SSM runs for LLM optimization benchmarking and async queue-path checks. The deployment includes runtime overrides validated via systemd drop-ins for:
+
+- Ollama LLM routing (`LLM_OPTIMIZER_PROVIDER=ollama`, `LLM_OPTIMIZER_MODEL=tokemizer-q4_k_m`)
+- LLM host endpoint (`LLM_OPTIMIZER_OLLAMA_BASE_URL=http://10.80.1.191:11434`)
+- Async queue path (`LLM_OPTIMIZE_ASYNC_ENABLED=true`, SQS queue URL/region/wait/visibility settings)
+- Ollama keepalive and inference knobs (`LLM_OLLAMA_KEEP_ALIVE`, `LLM_OLLAMA_NUM_THREAD`, `LLM_OLLAMA_NUM_CTX`, `LLM_OLLAMA_NUM_PREDICT`, `LLM_OLLAMA_RAW`)
+
+These are runtime tuning overlays and do not change the core network topology listed above.
 
 ---
 

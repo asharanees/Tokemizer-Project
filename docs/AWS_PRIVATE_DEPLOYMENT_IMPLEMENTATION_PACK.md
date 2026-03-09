@@ -194,6 +194,33 @@ Restrict scope to your instance IDs and region.
 - Keep `UVICORN_WORKERS=1` initially for SQLite write contention safety
 - Increase EBS size when model cache grows (online expansion is supported)
 
+## 11.1) Runtime admin controls to verify after deploy
+
+After first successful deploy/login, validate these runtime controls from Admin Settings/API:
+
+- `llm_system_context` is admin-only and managed through `PATCH /api/admin/settings`.
+- Saving `llm_system_context` synchronizes content to `LLM compression context.txt`.
+- Runtime LLM optimization reads admin DB context first, then file/default fallback.
+- `telemetry_enabled` persists in runtime settings and survives backend restarts.
+
+Quick API checks:
+
+```bash
+# Admin settings read
+curl -f -H "Authorization: Bearer $TOKEN" https://api.<your-domain>/api/admin/settings
+
+# Admin settings update (example)
+curl -f -X PATCH https://api.<your-domain>/api/admin/settings \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"telemetry_enabled": true, "llm_system_context": "You are a precision-preserving compressor."}'
+```
+
+Observability verification:
+
+- `GET /api/v1/history` contains LLM requests with `"llm_based"` in `techniques_applied`.
+- `GET /api/v1/telemetry/recent` returns `pass_name="llm_based"` rows when telemetry is enabled.
+
 ## 12) Validation checklist
 
 - [ ] Frontend URL loads from Amplify
@@ -203,6 +230,9 @@ Restrict scope to your instance IDs and region.
 - [ ] New user registration persists after EC2 reboot
 - [ ] `HF_HOME` points to `/data/tokemizer/models/hf`
 - [ ] Backend deploy workflow succeeds from GitHub Actions
+- [ ] `GET /api/admin/settings` returns `llm_system_context` for admin users
+- [ ] `GET /api/v1/settings` does not expose `llm_system_context`
+- [ ] LLM-based requests appear in history and telemetry (`llm_based`)
 
 ## 13) Cost/scale note
 

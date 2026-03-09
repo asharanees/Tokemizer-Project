@@ -286,6 +286,26 @@ docker compose logs backend --tail=100
 docker compose logs frontend --tail=100
 ```
 
+Runtime settings and observability checks:
+
+```bash
+# Admin settings should include llm_system_context (admin token required)
+curl -f -H "Authorization: Bearer $TOKEN" https://yourdomain.com/api/admin/settings
+
+# Customer runtime settings should not expose llm_system_context
+curl -f -H "Authorization: Bearer $TOKEN" https://yourdomain.com/api/v1/settings
+
+# Verify history/telemetry include llm_based after an LLM optimization run
+curl -f -H "Authorization: Bearer $TOKEN" "https://yourdomain.com/api/v1/history?limit=10"
+curl -f -H "Authorization: Bearer $TOKEN" "https://yourdomain.com/api/v1/telemetry/recent?limit=50"
+```
+
+Expected behavior:
+
+- `llm_system_context` is admin-only (`/api/admin/settings`).
+- `telemetry_enabled` toggles take effect immediately and persist across restarts.
+- LLM-powered optimization entries surface as `llm_based` in history/telemetry.
+
 Model upload smoke test (replace `<MODEL_TYPE>` and archive path):
 
 ```bash
