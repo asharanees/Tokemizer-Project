@@ -2206,11 +2206,61 @@ def _source_contains_code(text: str) -> bool:
     )
 
 
+def _has_programming_artifacts(text: str) -> bool:
+    candidate = (text or "").strip()
+    if not candidate:
+        return False
+
+    lowered = candidate.lower()
+    keyword_hits = sum(
+        1
+        for token in (
+            "import ",
+            " from ",
+            "def ",
+            "class ",
+            "return",
+            "try:",
+            "except",
+            "raise",
+            "print(",
+            "connect(",
+            "cursor",
+            "psycopg2",
+            "sqlalchemy",
+        )
+        if token in lowered
+    )
+    if keyword_hits >= 2:
+        return True
+
+    assignment_hits = len(re.findall(r"\b[a-zA-Z_][\w]*\s*=\s*[^=]", candidate))
+    call_hits = len(re.findall(r"\b[a-zA-Z_][\w]*\s*\(", candidate))
+    if assignment_hits >= 2 and call_hits >= 1:
+        return True
+
+    if re.search(r"\b(psycopg2|sqlalchemy|numpy|pandas|requests)\b", lowered) and (
+        assignment_hits >= 1 or call_hits >= 1
+    ):
+        return True
+
+    code_char_ratio = sum(ch in "{}[]();=_" for ch in candidate) / max(
+        len(candidate),
+        1,
+    )
+    if code_char_ratio >= 0.055 and (assignment_hits >= 1 or call_hits >= 2):
+        return True
+
+    return False
+
+
 def _looks_like_code_response(text: str) -> bool:
     candidate = (text or "").strip()
     if not candidate:
         return False
     if "```" in candidate:
+        return True
+    if _has_programming_artifacts(candidate):
         return True
     code_lines = 0
     for line in candidate.splitlines()[:80]:
@@ -2236,6 +2286,26 @@ def _summarize_request_text(text: str, max_chars: int = 700) -> str:
     if split_index > int(max_chars * 0.6):
         clipped = clipped[: split_index + 1]
     return clipped.rstrip() + "..."
+
+
+def _summarize_noncode_request_text(text: str, max_chars: int = 280) -> str:
+    candidate = (text or "")
+    candidate = re.sub(r"```.*?```", " ", candidate, flags=re.DOTALL)
+    candidate = re.sub(r"`[^`]+`", " ", candidate)
+    candidate = re.sub(r"\b[a-zA-Z_][\w]*\s*=\s*[^\n,;]{1,180}", " ", candidate)
+    candidate = re.sub(
+        r"\b(import|from|def|class|return|try|except|raise|print|psycopg2|sqlalchemy|cursor|connect)\b[^\n.]{0,220}",
+        " ",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    candidate = re.sub(r"\s+", " ", candidate).strip()
+    if not candidate or _has_programming_artifacts(candidate):
+        candidate = (
+            "Concise requirement summary requested. Preserve intent and constraints "
+            "without generating code."
+        )
+    return _summarize_request_text(candidate, max_chars=max_chars)
 
 
 def _optimize_single_llm(
@@ -2468,13 +2538,19 @@ def _optimize_single_llm(
             if not stripped or stripped.startswith("```"):
                 continue
             if re.match(
-                r"^(import\s+|from\s+\w+\s+import\s+|def\s+\w+\(|class\s+\w+|return\b|if\b|for\b|while\b|try:|except\b|with\b|function\s+\w+\(|const\s+\w+\s*=|let\s+\w+\s*=|var\s+\w+\s*=)",
+                r"^(import\s+|from\s+\w+\s+import\s+|def\s+\w+\(|class\s+\w+|return\b|if\b|for\b|while\b|try:|except\b|with\b|function\s+\w+\(|const\s+\w+\s*=|let\s+\w+\s*=|var\s+\w+\s*=|[A-Za-z_][\w]*\s*=\s*.+)",
                 stripped,
             ):
                 continue
             prose_lines.append(stripped)
         sanitized = " ".join(prose_lines).strip()
-        optimized_output = sanitized if len(sanitized) >= 40 else _summarize_request_text(prompt)
+        if _has_programming_artifacts(sanitized):
+            sanitized = ""
+        optimized_output = (
+            sanitized
+            if len(sanitized) >= 40
+            else _summarize_noncode_request_text(prompt)
+        )
 
     constraints = _extract_hard_constraint_tokens(prompt)
     missing_constraints = [token for token in constraints if token not in optimized_output]
