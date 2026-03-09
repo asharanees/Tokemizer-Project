@@ -2149,7 +2149,12 @@ def _apply_constraint_enforcement(
     missing_after = [token for token in constraints if token not in optimized_output]
     if missing_after:
         connector = " " if optimized_output.endswith((".", "!", "?")) else ". "
-        silent_tail = "Key values: " + ", ".join(missing_after) + "."
+        if len(missing_after) == 1:
+            silent_tail = f"Include {missing_after[0]}."
+        elif len(missing_after) == 2:
+            silent_tail = f"Include {missing_after[0]} and {missing_after[1]}."
+        else:
+            silent_tail = "Include " + ", ".join(missing_after[:-1]) + f", and {missing_after[-1]}."
         optimized_output = (optimized_output.rstrip() + connector + silent_tail).strip()
         appended_count = len(missing_after)
         missing_after = [token for token in constraints if token not in optimized_output]
