@@ -2265,6 +2265,8 @@ def _optimize_single_llm(
     timeout_fast = _env_int("FAST_JOB_TIMEOUT", 180, minimum=30, maximum=900)
     timeout_heavy = _env_int("HEAVY_JOB_TIMEOUT", 300, minimum=60, maximum=1800)
     inference_timeout_seconds = timeout_heavy if len(chunks) > 1 else timeout_fast
+    low_quality_retry_enabled = _env_truthy("LLM_LOW_QUALITY_RETRY_ENABLED", "false")
+    constraint_repair_enabled = _env_truthy("LLM_CONSTRAINT_REPAIR_ENABLED", "false")
 
     if len(chunks) > 1:
         logger.info(
@@ -2362,7 +2364,7 @@ def _optimize_single_llm(
                             llm_result = _call_llm_with_timeout(composed_prompt)
 
                         llm_text = (llm_result.text or "").strip()
-                        if _is_low_quality_llm_rewrite(llm_text):
+                        if low_quality_retry_enabled and _is_low_quality_llm_rewrite(llm_text):
                             retry_prompt = (
                                 f"{composed_prompt}\n"
                                 "\nVALIDATION_FEEDBACK:\n"
@@ -2414,7 +2416,7 @@ def _optimize_single_llm(
 
     constraints = _extract_hard_constraint_tokens(prompt)
     missing_constraints = [token for token in constraints if token not in optimized_output]
-    if missing_constraints:
+    if constraint_repair_enabled and missing_constraints:
         repair_prompt = (
             f"{system_context}\n\n"
             "TASK:\n"
