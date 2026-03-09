@@ -2288,7 +2288,12 @@ def _summarize_request_text(text: str, max_chars: int = 700) -> str:
     return clipped.rstrip() + "..."
 
 
-def _summarize_noncode_request_text(text: str, max_chars: int = 280) -> str:
+def _summarize_noncode_request_text(
+    text: str,
+    max_chars: int = 280,
+    *,
+    allow_long_output: bool = False,
+) -> str:
     candidate = (text or "")
     candidate = re.sub(r"```.*?```", " ", candidate, flags=re.DOTALL)
     candidate = re.sub(r"`([^`]+)`", r"\1", candidate)
@@ -2320,6 +2325,16 @@ def _summarize_noncode_request_text(text: str, max_chars: int = 280) -> str:
         )
         reduced = re.sub(r"\s+", " ", reduced).strip(" -;,")
         merged = reduced if reduced else normalized
+
+    if allow_long_output:
+        long_cap = _env_int(
+            "LLM_FULFILLMENT_SUMMARY_MAX_CHARS",
+            1800,
+            minimum=600,
+            maximum=6000,
+        )
+        if len(merged) <= long_cap:
+            return merged
 
     return _summarize_request_text(merged, max_chars=max_chars)
 
@@ -2562,7 +2577,11 @@ def _optimize_single_llm(
         raise HTTPException(status_code=502, detail="LLM optimizer returned empty output")
 
     if not _source_contains_code(prompt) and _is_fulfillment_style_request(prompt):
-        optimized_output = _summarize_noncode_request_text(prompt, max_chars=520)
+        optimized_output = _summarize_noncode_request_text(
+            prompt,
+            max_chars=1200,
+            allow_long_output=True,
+        )
 
     if not _source_contains_code(prompt) and _looks_like_code_response(optimized_output):
         prose_lines: List[str] = []
