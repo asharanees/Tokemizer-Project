@@ -53,7 +53,7 @@ def _resolve_ollama_num_predict() -> int:
         parsed = int(raw_value)
     except (TypeError, ValueError):
         return 80
-    return max(16, min(parsed, 80))
+    return max(16, min(parsed, 256))
 
 
 def _resolve_ollama_temperature() -> float:
@@ -370,6 +370,10 @@ def _call_ollama(model: str, prompt: str, api_key: str) -> LLMResult:
     max_attempts = _resolve_ollama_retry_count()
     keep_alive = _resolve_ollama_keep_alive()
     num_predict = _resolve_ollama_num_predict()
+    if len(prompt) >= 2800:
+        num_predict = max(num_predict, 160)
+    elif len(prompt) >= 1800:
+        num_predict = max(num_predict, 120)
     temperature = _resolve_ollama_temperature()
     top_p = _resolve_ollama_top_p()
 

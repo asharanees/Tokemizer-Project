@@ -2144,9 +2144,6 @@ def _apply_constraint_enforcement(
         }
 
     missing_before = [token for token in constraints if token not in optimized_output]
-    if missing_before:
-        suffix = "\n\nCONSTRAINTS: " + " | ".join(missing_before)
-        optimized_output = (optimized_output.rstrip() + suffix).strip()
 
     missing_after = [token for token in constraints if token not in optimized_output]
     if missing_after and _env_truthy("LLM_STRICT_CONSTRAINT_FAILURE", "true"):
@@ -2161,7 +2158,7 @@ def _apply_constraint_enforcement(
     return optimized_output, {
         "detected": len(constraints),
         "missing_before": len(missing_before),
-        "appended": len(missing_before),
+        "appended": 0,
         "missing_after": len(missing_after),
     }
 
@@ -2401,6 +2398,44 @@ def _optimize_single_llm(
     optimized_output = "\n\n".join(piece for piece in llm_outputs if piece).strip()
     if not optimized_output:
         raise HTTPException(status_code=502, detail="LLM optimizer returned empty output")
+
+    constraints = _extract_hard_constraint_tokens(prompt)
+    missing_constraints = [token for token in constraints if token not in optimized_output]
+    if missing_constraints:
+        repair_prompt = (
+            f"{system_context}\n\n"
+            "TASK:\n"
+            "Revise CANDIDATE_OUTPUT so it remains concise and preserves key meaning from SOURCE_TEXT.\n"
+            "You MUST include every value in MUST_INCLUDE_EXACT exactly as written.\n"
+            "Return only final revised content.\n"
+            "Do not add labels, preambles, or meta-commentary.\n\n"
+            f"MUST_INCLUDE_EXACT: {' | '.join(missing_constraints)}\n\n"
+            "SOURCE_TEXT_BEGIN\n"
+            f"{prompt}\n"
+            "SOURCE_TEXT_END\n\n"
+            "CANDIDATE_OUTPUT_BEGIN\n"
+            f"{optimized_output}\n"
+            "CANDIDATE_OUTPUT_END\n"
+        )
+        repair_token_estimate = optimizer.count_tokens(repair_prompt)
+        if repair_token_estimate <= max_composed_tokens:
+            with tracing_service.start_span(
+                "llm.call.constraint_repair",
+                kind=tracing_service.SpanKind.CLIENT,
+                attributes={
+                    "llm.provider": provider,
+                    "llm.model": model,
+                    "prompt.composed_tokens_estimate": repair_token_estimate,
+                    "constraints.missing": len(missing_constraints),
+                },
+            ):
+                with _llm_inference_lock:
+                    with _HostInferenceFileLock(_llm_host_lock_path):
+                        repair_result = _call_llm_with_timeout(repair_prompt)
+            repaired_text = (repair_result.text or "").strip()
+            if repaired_text:
+                optimized_output = repaired_text
+                total_inference_ms += float(repair_result.duration_ms)
 
     optimized_output, constraint_metrics = _apply_constraint_enforcement(
         prompt,
