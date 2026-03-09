@@ -2314,7 +2314,36 @@ def _summarize_noncode_request_text(
         re.IGNORECASE,
     )
     prioritized = [clause for clause in clauses if priority_pattern.search(clause)]
-    merged = " ".join(prioritized if prioritized else clauses)
+
+    def _signature(value: str) -> str:
+        lowered = value.lower()
+        lowered = re.sub(
+            r"\b(i need your help|please|urgently|very important|as soon as possible|very urgent|high priority|carefully|thoroughly|diligently|again|i repeat|this is critical|do not miss|with care|completeness|quality|reliability)\b",
+            " ",
+            lowered,
+        )
+        lowered = re.sub(r"[^a-z0-9=._\-\s]", " ", lowered)
+        lowered = re.sub(r"\s+", " ", lowered).strip()
+        return lowered
+
+    source_clauses = prioritized if prioritized else clauses
+    unique_clauses: List[str] = []
+    seen_signatures: set[str] = set()
+    for clause in source_clauses:
+        sig = _signature(clause)
+        if not sig or sig in seen_signatures:
+            continue
+        seen_signatures.add(sig)
+        unique_clauses.append(clause)
+
+    merged = " ".join(unique_clauses if unique_clauses else source_clauses)
+    merged = re.sub(
+        r"\b(i need your help|please|urgently|very important|as soon as possible|very urgent|high priority)\b",
+        " ",
+        merged,
+        flags=re.IGNORECASE,
+    )
+    merged = re.sub(r"\s+", " ", merged).strip(" -;,")
 
     if _has_programming_artifacts(merged):
         reduced = re.sub(
