@@ -3883,8 +3883,8 @@ def _start_ollama_keepalive_worker() -> None:
     if provider != "ollama":
         return
 
-    warm_enabled = _env_truthy("LLM_OLLAMA_WARM_ON_STARTUP", "true")
-    heartbeat_enabled = _env_truthy("LLM_OLLAMA_KEEPALIVE_ENABLED", "true")
+    warm_enabled = _env_truthy("LLM_OLLAMA_WARM_ON_STARTUP", "false")
+    heartbeat_enabled = _env_truthy("LLM_OLLAMA_KEEPALIVE_ENABLED", "false")
     if not warm_enabled and not heartbeat_enabled:
         logger.info("Ollama warm/keepalive disabled by environment")
         return
