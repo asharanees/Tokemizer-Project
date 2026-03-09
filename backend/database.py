@@ -46,6 +46,11 @@ _ADMIN_SETTING_CANONICAL_CACHE_VERSION = "canonical_cache_version"
 _ADMIN_SETTING_LLM_SYSTEM_CONTEXT = "llm_system_context"
 _LEARNED_PHRASE_MAX_ENTRIES_DEFAULT = 200
 _LEARNED_PHRASE_TTL_DAYS_DEFAULT = 90
+_DEFAULT_LLM_SYSTEM_CONTEXT = (
+    "You are an expert semantic compression engine. Compress text aggressively while "
+    "preserving meaning, facts, numbers, quoted text, code blocks, constraints, and "
+    "actionable instructions. Return only the compressed result."
+)
 
 
 def _resolve_env_int(name: str, default: int) -> int:
@@ -1064,11 +1069,7 @@ def _load_default_llm_system_context() -> str:
             return content
     except OSError:
         pass
-    return (
-        "You are an expert semantic compression engine. Compress text aggressively while "
-        "preserving meaning, facts, numbers, quoted text, code blocks, constraints, and "
-        "actionable instructions. Return only the compressed result."
-    )
+    return _DEFAULT_LLM_SYSTEM_CONTEXT
 
 
 def _save_default_llm_system_context(value: str) -> None:
@@ -1090,7 +1091,8 @@ def get_llm_system_context() -> str:
     value = get_admin_setting(_ADMIN_SETTING_LLM_SYSTEM_CONTEXT, None)
     if isinstance(value, str) and value.strip():
         return value.strip()
-    return _load_default_llm_system_context()
+    fallback = _load_default_llm_system_context().strip()
+    return fallback or _DEFAULT_LLM_SYSTEM_CONTEXT
 
 
 def set_llm_system_context(value: str) -> None:
