@@ -2145,7 +2145,15 @@ def _apply_constraint_enforcement(
 
     missing_before = [token for token in constraints if token not in optimized_output]
 
+    appended_count = 0
     missing_after = [token for token in constraints if token not in optimized_output]
+    if missing_after:
+        connector = " " if optimized_output.endswith((".", "!", "?")) else ". "
+        silent_tail = "Key values: " + ", ".join(missing_after) + "."
+        optimized_output = (optimized_output.rstrip() + connector + silent_tail).strip()
+        appended_count = len(missing_after)
+        missing_after = [token for token in constraints if token not in optimized_output]
+
     if missing_after and _env_truthy("LLM_STRICT_CONSTRAINT_FAILURE", "true"):
         raise HTTPException(
             status_code=502,
@@ -2158,7 +2166,7 @@ def _apply_constraint_enforcement(
     return optimized_output, {
         "detected": len(constraints),
         "missing_before": len(missing_before),
-        "appended": 0,
+        "appended": appended_count,
         "missing_after": len(missing_after),
     }
 
