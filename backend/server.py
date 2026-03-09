@@ -2193,6 +2193,51 @@ def _is_low_quality_llm_rewrite(text: str) -> bool:
     return False
 
 
+def _source_contains_code(text: str) -> bool:
+    candidate = text or ""
+    if "```" in candidate:
+        return True
+    return bool(
+        re.search(
+            r"^\s*(import\s+\w+|from\s+\w+\s+import\s+|def\s+\w+\(|class\s+\w+|function\s+\w+\(|const\s+\w+\s*=|let\s+\w+\s*=)",
+            candidate,
+            re.MULTILINE,
+        )
+    )
+
+
+def _looks_like_code_response(text: str) -> bool:
+    candidate = (text or "").strip()
+    if not candidate:
+        return False
+    if "```" in candidate:
+        return True
+    code_lines = 0
+    for line in candidate.splitlines()[:80]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if re.match(
+            r"^(import\s+|from\s+\w+\s+import\s+|def\s+\w+\(|class\s+\w+|return\b|if\b|for\b|while\b|try:|except\b|with\b|function\s+\w+\(|const\s+\w+\s*=|let\s+\w+\s*=|var\s+\w+\s*=)",
+            stripped,
+        ):
+            code_lines += 1
+        elif stripped.endswith(";") or stripped.endswith("{") or stripped.endswith("}"):
+            code_lines += 1
+    return code_lines >= 4
+
+
+def _summarize_request_text(text: str, max_chars: int = 700) -> str:
+    normalized = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    clipped = normalized[:max_chars]
+    split_index = max(clipped.rfind(". "), clipped.rfind("; "), clipped.rfind(", "))
+    if split_index > int(max_chars * 0.6):
+        clipped = clipped[: split_index + 1]
+    return clipped.rstrip() + "..."
+
+
 def _optimize_single_llm(
     prompt: str,
     request: OptimizationRequest,
@@ -2415,6 +2460,21 @@ def _optimize_single_llm(
     optimized_output = "\n\n".join(piece for piece in llm_outputs if piece).strip()
     if not optimized_output:
         raise HTTPException(status_code=502, detail="LLM optimizer returned empty output")
+
+    if not _source_contains_code(prompt) and _looks_like_code_response(optimized_output):
+        prose_lines: List[str] = []
+        for line in optimized_output.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("```"):
+                continue
+            if re.match(
+                r"^(import\s+|from\s+\w+\s+import\s+|def\s+\w+\(|class\s+\w+|return\b|if\b|for\b|while\b|try:|except\b|with\b|function\s+\w+\(|const\s+\w+\s*=|let\s+\w+\s*=|var\s+\w+\s*=)",
+                stripped,
+            ):
+                continue
+            prose_lines.append(stripped)
+        sanitized = " ".join(prose_lines).strip()
+        optimized_output = sanitized if len(sanitized) >= 40 else _summarize_request_text(prompt)
 
     constraints = _extract_hard_constraint_tokens(prompt)
     missing_constraints = [token for token in constraints if token not in optimized_output]
