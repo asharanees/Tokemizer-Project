@@ -2310,7 +2310,7 @@ def _summarize_noncode_request_text(
         clauses = [normalized]
 
     priority_pattern = re.compile(
-        r"(constraint|must|include|preserve|exact|verbatim|order|header|field|format|output|python|postgres|host|port|csv|retry|backoff|mask|domain|stream|memory|unit test|docstring|type hint|security)",
+        r"(constraint|must|include|preserve|exact|verbatim|order|header|field|format|output|python|postgres|host|port|csv|retry|backoff|mask|domain|stream|memory|unit test|docstring|type hint|security|execution plan|return both code|single code block|under\s*\d+\s*lines|line limit)",
         re.IGNORECASE,
     )
     prioritized = [clause for clause in clauses if priority_pattern.search(clause)]
