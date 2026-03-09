@@ -1081,6 +1081,10 @@ def _save_default_llm_system_context(value: str) -> None:
 
 
 def get_llm_system_context() -> str:
+    value = get_admin_setting(_ADMIN_SETTING_LLM_SYSTEM_CONTEXT, None)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+
     use_file_default = (
         os.environ.get("LLM_SYSTEM_CONTEXT_FROM_FILE", "true").strip().lower()
         in {"1", "true", "yes", "on"}
@@ -1088,9 +1092,6 @@ def get_llm_system_context() -> str:
     if use_file_default:
         return _load_default_llm_system_context()
 
-    value = get_admin_setting(_ADMIN_SETTING_LLM_SYSTEM_CONTEXT, None)
-    if isinstance(value, str) and value.strip():
-        return value.strip()
     fallback = _load_default_llm_system_context().strip()
     return fallback or _DEFAULT_LLM_SYSTEM_CONTEXT
 
