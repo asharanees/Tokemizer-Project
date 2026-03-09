@@ -1722,3 +1722,36 @@ def test_deterministic_fulfillment_summary_feature_flag_controls_output(
     assert "under 300 lines" in lowered
     assert "host=prod-db" in lowered
     assert result_enabled.optimized_output != "llm drafted output"
+
+
+def test_summarize_noncode_request_text_cleans_repetition_and_fragments() -> None:
+    import server
+
+    prompt = (
+        "and this is . carefully and thoroughly build a production-ready Python script for extracting user analytics data Postgres. "
+        "The database is host=prod-db and port=5432, and this is critical: CSV headers must be exactly in this order: "
+        "user_id, email, signup_date, last_active, 30d_retention_score. do not miss constraints: standard library only, "
+        "Python 3.9, include retry/backoff, mask email local-part but keep domain, stream rows to avoid memory spikes, "
+        "include unit tests, docstrings, type hints, and one-paragraph security justification. I repeat again because this is critical: "
+        "host=prod-db, port=5432, exact header order user_id, email, signup_date, last_active, 30d_retention_score, standard library only, "
+        "Python 3.9, retry/backoff, email masking, streaming, tests, docstrings, type hints, security note. both code and short execution plan. "
+        "Response format single code block. Keep under 300 lines. This is for production and and and must be done quickly and diligently "
+        "and with care and completeness and quality and reliability. Again: standard library only, Python 3.9, retry/backoff, email masking, "
+        "streaming, tests, docstrings, type hints, security paragraph, single code block, under 300 lines, code plus short execution pla"
+    )
+
+    summarized = server._summarize_noncode_request_text(
+        prompt,
+        max_chars=1200,
+        allow_long_output=True,
+    )
+    lowered = summarized.lower()
+
+    assert "and this is ." not in lowered
+    assert "and and and" not in lowered
+    assert lowered.count("standard library only") == 1
+    assert "execution plan" in lowered
+    assert "single code block" in lowered
+    assert "under 300 lines" in lowered
+    assert "host=prod-db" in lowered
+    assert not lowered.endswith(" pla")

@@ -2294,6 +2294,37 @@ def _summarize_noncode_request_text(
     *,
     allow_long_output: bool = False,
 ) -> str:
+    def _clean_clause(value: str) -> str:
+        cleaned = (value or "")
+        cleaned = re.sub(
+            r"\b(i need your help|please|urgently|very important|as soon as possible|very urgent|high priority|carefully|thoroughly|diligently|again|i repeat|this is critical|do not miss|with care|completeness|quality|reliability)\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(r"\b(and\s+){2,}", "and ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" -;,")
+        cleaned = re.sub(r"^(?:and|but|so)\b[\s,:;.-]*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s*([,;:.])\s*", r"\1 ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip(" -;,")
+        if cleaned.lower() in {"and this is", "this is", "and this"}:
+            return ""
+        return cleaned
+
+    def _trim_broken_tail(value: str) -> str:
+        text_value = (value or "").strip()
+        if not text_value:
+            return text_value
+        match = re.search(r"([A-Za-z]{1,3})$", text_value)
+        if not match:
+            return text_value
+        token = match.group(1).lower()
+        keep_short_tokens = {"csv", "api", "sql", "aws", "db"}
+        if token in keep_short_tokens:
+            return text_value
+        cutoff = match.start(1)
+        return text_value[:cutoff].rstrip(" -;,")
+
     candidate = (text or "")
     candidate = re.sub(r"```.*?```", " ", candidate, flags=re.DOTALL)
     candidate = re.sub(r"`([^`]+)`", r"\1", candidate)
@@ -2301,11 +2332,27 @@ def _summarize_noncode_request_text(
     if not normalized:
         return "Concise requirement summary requested."
 
-    clauses = [
+    rough_clauses = [
         piece.strip(" -;,")
-        for piece in re.split(r"(?<=[.!?;])\s+", normalized)
+        for piece in re.split(
+            r"(?<=[.!?;])\s+|\b(?:again\s*:|i repeat(?: again)?(?: because this is critical)?\s*:)\b",
+            normalized,
+            flags=re.IGNORECASE,
+        )
         if piece.strip()
     ]
+    clauses: List[str] = []
+    for piece in rough_clauses:
+        expanded_parts = [piece]
+        if piece.count(",") >= 4 and len(piece) >= 100:
+            comma_segments = [segment.strip(" -;,") for segment in piece.split(",") if segment.strip()]
+            if len(comma_segments) >= 4:
+                expanded_parts = comma_segments
+        for part in expanded_parts:
+            cleaned_part = _clean_clause(part)
+            if cleaned_part:
+                clauses.append(cleaned_part)
+
     if not clauses:
         clauses = [normalized]
 
@@ -2322,6 +2369,8 @@ def _summarize_noncode_request_text(
             " ",
             lowered,
         )
+        lowered = re.sub(r"\b(and\s+){2,}", "and ", lowered)
+        lowered = re.sub(r"^(?:and|but|so)\b[\s,:;.-]*", "", lowered)
         lowered = re.sub(r"[^a-z0-9=._\-\s]", " ", lowered)
         lowered = re.sub(r"\s+", " ", lowered).strip()
         return lowered
@@ -2338,12 +2387,18 @@ def _summarize_noncode_request_text(
 
     merged = " ".join(unique_clauses if unique_clauses else source_clauses)
     merged = re.sub(
-        r"\b(i need your help|please|urgently|very important|as soon as possible|very urgent|high priority)\b",
+        r"\b(i need your help|please|urgently|very important|as soon as possible|very urgent|high priority|again|i repeat|this is critical|do not miss|with care|completeness|quality|reliability)\b",
         " ",
         merged,
         flags=re.IGNORECASE,
     )
+    merged = re.sub(r"\b(and\s+){2,}", "and ", merged, flags=re.IGNORECASE)
+    merged = re.sub(r"^(?:and|but|so)\b[\s,:;.-]*", "", merged, flags=re.IGNORECASE)
+    merged = re.sub(r"\s*([,;:.])\s*", r"\1 ", merged)
     merged = re.sub(r"\s+", " ", merged).strip(" -;,")
+    merged = _trim_broken_tail(merged)
+    if not merged:
+        merged = _summarize_request_text(normalized, max_chars=max_chars)
 
     if _has_programming_artifacts(merged):
         reduced = re.sub(
