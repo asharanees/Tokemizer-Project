@@ -1071,6 +1071,14 @@ def _load_default_llm_system_context() -> str:
     )
 
 
+def _save_default_llm_system_context(value: str) -> None:
+    default_path = ROOT_DIR.parent / "LLM compression context.txt"
+    try:
+        default_path.write_text(f"{value.rstrip()}\n", encoding="utf-8")
+    except OSError as exc:
+        logging.warning("Failed to write LLM compression context file: %s", exc)
+
+
 def get_llm_system_context() -> str:
     use_file_default = (
         os.environ.get("LLM_SYSTEM_CONTEXT_FROM_FILE", "true").strip().lower()
@@ -1090,6 +1098,7 @@ def set_llm_system_context(value: str) -> None:
     if not cleaned_value:
         cleaned_value = _load_default_llm_system_context()
     set_admin_setting(_ADMIN_SETTING_LLM_SYSTEM_CONTEXT, cleaned_value)
+    _save_default_llm_system_context(cleaned_value)
 
 
 def _cleanup_learned_phrase_dictionary(customer_id: str) -> None:

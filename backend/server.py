@@ -10,6 +10,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from contextlib import asynccontextmanager
@@ -26,6 +27,8 @@ except Exception:  # pragma: no cover - unavailable on non-POSIX platforms
 from auth import get_current_customer, require_admin, track_usage
 from database import (
     Customer,
+    TelemetryPassMetric,
+    TelemetryRecord,
     aggregate_history_stats,
     bulk_create_canonical_mappings,
     create_batch_job,
@@ -53,6 +56,7 @@ from database import (
     set_admin_setting,
     set_llm_profiles,
     set_llm_system_context,
+    submit_telemetry,
     create_llm_optimization_job,
     update_llm_optimization_job,
     update_batch_job,
@@ -1903,7 +1907,8 @@ def _optimize_single(
     customer_id: Optional[str] = None,
 ) -> OptimizationResponse:
     if request.optimization_technique == "llm_based":
-        return _optimize_single_llm(prompt, request)
+        with customer_scope(customer_id):
+            return _optimize_single_llm(prompt, request)
 
     from services.optimizer.core import TIKTOKEN_AVAILABLE, np
 
@@ -2734,6 +2739,7 @@ def _optimize_single_llm(
         prompt,
         optimized_output,
     )
+
     logger.info(
         "llm_worker_event=constraint_enforcement job_id=%s detected=%s missing_before=%s appended=%s missing_after=%s",
         job_id or "n/a",
@@ -2756,6 +2762,58 @@ def _optimize_single_llm(
         (token_savings / original_tokens) * 100.0 if original_tokens else 0.0
     )
 
+    optimization_id = str(uuid.uuid4())
+    prompt_rate = float(getattr(optimizer, "prompt_cost_per_1k", 0.0) or 0.0)
+    cost_before = (original_tokens / 1000.0) * prompt_rate
+    cost_after = (optimized_tokens / 1000.0) * prompt_rate
+    cost_saved = max(cost_before - cost_after, 0.0)
+    techniques_applied = [
+        "LLM Based Optimization",
+        f"Provider: {provider}",
+        f"Model: {model}",
+    ]
+
+    try:
+        record_optimization_history(
+            record_id=optimization_id,
+            mode="llm_based",
+            raw_prompt=prompt,
+            optimized_prompt=optimized_output,
+            raw_tokens=original_tokens,
+            optimized_tokens=optimized_tokens,
+            processing_time_ms=processing_time_ms,
+            estimated_cost_before=cost_before,
+            estimated_cost_after=cost_after,
+            estimated_cost_saved=cost_saved,
+            compression_percentage=compression_percentage,
+            semantic_similarity=None,
+            techniques_applied=techniques_applied,
+        )
+    except Exception:
+        logger.exception("Failed to record LLM optimization history")
+
+    try:
+        submit_telemetry(
+            TelemetryRecord(
+                optimization_id=optimization_id,
+                passes=[
+                    TelemetryPassMetric(
+                        pass_name="LLM Based Optimization",
+                        pass_order=1,
+                        duration_ms=processing_time_ms,
+                        tokens_before=original_tokens,
+                        tokens_after=optimized_tokens,
+                        tokens_saved=token_savings,
+                        reduction_percent=compression_percentage,
+                        content_profile="llm_based",
+                        optimization_mode=request.optimization_mode,
+                    )
+                ],
+            )
+        )
+    except Exception:
+        logger.exception("Failed to record LLM optimization telemetry")
+
     return OptimizationResponse(
         optimized_output=optimized_output,
         stats=OptimizationStats(
@@ -2774,11 +2832,7 @@ def _optimize_single_llm(
             deduplication=None,
         ),
         router={"content_type": "llm_based", "profile": "llm_based"},
-        techniques_applied=[
-            "LLM Based Optimization",
-            f"Provider: {provider}",
-            f"Model: {model}",
-        ],
+        techniques_applied=techniques_applied,
         warnings=None,
     )
 
@@ -3024,7 +3078,6 @@ class SettingsResponse(BaseModel):
     telemetry_enabled: bool
     lsh_enabled: bool
     lsh_similarity_threshold: float
-    llm_system_context: str
     llm_profiles: List[LLMProfile]
 
 
@@ -3041,7 +3094,6 @@ class SettingsUpdateRequest(BaseModel):
     telemetry_enabled: Optional[bool] = None
     lsh_enabled: Optional[bool] = None
     lsh_similarity_threshold: Optional[float] = Field(None, ge=0.0, le=1.0)
-    llm_system_context: Optional[str] = None
     llm_profiles: Optional[List[LLMProfile]] = None
 
 
@@ -3058,7 +3110,6 @@ def _build_settings_response(customer_id: Optional[str] = None) -> SettingsRespo
         telemetry_enabled=is_telemetry_enabled(),
         lsh_enabled=getattr(optimizer, "enable_lsh_deduplication", False),
         lsh_similarity_threshold=getattr(optimizer, "lsh_similarity_threshold", 0.0),
-        llm_system_context=get_llm_system_context(),
         llm_profiles=[
             LLMProfile(
                 name=profile["name"],
@@ -3125,8 +3176,6 @@ def _apply_settings_update(
         optimizer.lsh_similarity_threshold = max(
             0.0, min(request.lsh_similarity_threshold, 1.0)
         )
-    if "llm_system_context" in updated_fields and request.llm_system_context is not None:
-        set_llm_system_context(request.llm_system_context)
     if (
         "llm_profiles" in updated_fields
         and request.llm_profiles is not None
@@ -3481,7 +3530,7 @@ async def update_settings(
 app.include_router(api_router)
 
 # Serve built frontend if available
-FRONTEND_DIST = ROOT_DIR / "frontend" / "dist"
+FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 if FRONTEND_DIST.exists():
     app.mount(
         "/",
@@ -3728,7 +3777,12 @@ def _process_llm_optimization_job(job_id: str) -> bool:
             if request.optimization_technique != "llm_based":
                 raise ValueError("Async queue supports only llm_based optimization")
 
-            result = _optimize_single_llm(request.prompt, request, job_id=job_id)
+            with customer_scope(job.customer_id):
+                result = _optimize_single_llm(
+                    request.prompt,
+                    request,
+                    job_id=job_id,
+                )
             total_latency = max(0.0, time.perf_counter() - job_started)
             update_llm_optimization_job(
                 job_id,

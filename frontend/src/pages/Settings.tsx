@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
 import { RefreshCw } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
@@ -42,7 +41,6 @@ interface SettingsResponse {
   telemetry_enabled: boolean;
   lsh_enabled: boolean;
   lsh_similarity_threshold: number;
-  llm_system_context: string;
   llm_profiles: LLMProfilePublic[];
 }
 
@@ -240,25 +238,6 @@ export default function Settings() {
                 ) : (
                   <>
                     <div className="grid md:grid-cols-2 gap-4">
-                      <div className="space-y-2 md:col-span-2">
-                        <Label htmlFor="llm_system_context" className="flex items-center gap-1.5">
-                          LLM System Context
-                          <HelpTooltip content="Global instruction context prepended to user prompts when LLM-based optimization is selected." />
-                        </Label>
-                        <Textarea
-                          id="llm_system_context"
-                          rows={8}
-                          placeholder="Enter global LLM optimization instructions"
-                          value={formValues.llm_system_context ?? ""}
-                          onChange={(event) =>
-                            setFormValues((prev) => {
-                              if (!prev) return prev;
-                              setIsDirty(true);
-                              return { ...prev, llm_system_context: event.target.value };
-                            })
-                          }
-                        />
-                      </div>
                       <div className="space-y-2">
                         <Label htmlFor="semantic_guard_model" className="flex items-center gap-1.5">
                           Semantic Guard Model

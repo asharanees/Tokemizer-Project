@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
 import { useEffect, useState } from "react";
 import { authFetch } from "@/lib/authFetch";
 
@@ -25,6 +26,7 @@ interface AdminSettings {
     optimizer_prewarm_models?: boolean;
     cors_origins?: string;
     smtp_from_email?: string;
+    llm_system_context?: string;
 }
 
 type AdminSettingsUpdate = AdminSettings & {
@@ -55,6 +57,7 @@ const buildAdminSettingsUpdatePayload = (
         optimizer_prewarm_models: form.optimizer_prewarm_models,
         cors_origins: form.cors_origins,
         smtp_from_email: form.smtp_from_email,
+        llm_system_context: form.llm_system_context,
     };
 
     if (stripeSecretKey) {
@@ -308,6 +311,16 @@ export default function AdminSettingsPage() {
                             <CardDescription>Configure core system behavior.</CardDescription>
                         </CardHeader>
                         <CardContent className="space-y-4">
+                            <div className="space-y-2">
+                                <Label htmlFor="llm_system_context">LLM System Context</Label>
+                                <Textarea
+                                    id="llm_system_context"
+                                    rows={8}
+                                    value={form.llm_system_context || ""}
+                                    onChange={(e) => setForm({ ...form, llm_system_context: e.target.value })}
+                                    placeholder="Global LLM compression instruction context"
+                                />
+                            </div>
                             <div className="flex flex-col space-y-4">
                                 <div className="flex items-center justify-between">
                                     <div className="space-y-0.5">

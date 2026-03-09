@@ -17,6 +17,7 @@ from database import (
     disable_customer,
     get_admin_setting,
     get_customer_by_id,
+    get_llm_system_context,
     get_subscription_plan_by_id,
     get_usage,
     list_all_customers,
@@ -25,6 +26,7 @@ from database import (
     list_subscription_plans,
     list_usage_breakdown,
     set_admin_setting,
+    set_llm_system_context,
     try_acquire_admin_setting_lock,
     update_customer,
 )
@@ -87,6 +89,7 @@ _ADMIN_SETTINGS_ALLOWED_KEYS = {
     "learned_abbreviations_enabled",
     "optimizer_prewarm_models",
     "cors_origins",
+    "llm_system_context",
 }
 _ADMIN_SETTINGS_BOOLEAN_KEYS = {
     "telemetry_enabled",
@@ -1190,6 +1193,7 @@ async def get_global_settings(admin: Customer = Depends(require_admin)):
             get_admin_setting("optimizer_prewarm_models", True)
         ),
         "cors_origins": get_admin_setting("cors_origins", "*"),
+        "llm_system_context": get_llm_system_context(),
     }
 
 
@@ -1211,6 +1215,9 @@ async def update_global_settings(
                 set_admin_setting(key, encrypt_value(str(value)))
             else:
                 set_admin_setting(key, "")
+            continue
+        if key == "llm_system_context":
+            set_llm_system_context(str(value or ""))
             continue
         normalized_settings[key] = _normalize_admin_setting(key, value)
 
