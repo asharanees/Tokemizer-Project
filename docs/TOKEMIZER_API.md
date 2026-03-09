@@ -740,13 +740,14 @@ Query recent optimization requests with compression stats.
       "mode": "balanced",
       "created_at": "2025-01-01T12:00:00Z",
       "techniques_applied": [
-        "Whitespace Compression",
-        "Entity Canonicalization"
+        "llm_based"
       ]
     }
   ]
 }
 ```
+
+**Note**: LLM-powered optimizations are recorded in history with `"llm_based"` in `techniques_applied`.
 
 ---
 
@@ -824,13 +825,13 @@ Get detailed per-pass optimization metrics (when telemetry is enabled).
 [
   {
     "optimization_id": "uuid-1234",
-    "pass_name": "normalize_whitespace",
+    "pass_name": "llm_based",
     "pass_order": 1,
-    "duration_ms": 2.3,
+    "duration_ms": 182.4,
     "tokens_before": 500,
-    "tokens_after": 490,
-    "tokens_saved": 10,
-    "reduction_percent": 2.0,
+    "tokens_after": 312,
+    "tokens_saved": 188,
+    "reduction_percent": 37.6,
     "created_at": "2025-01-01T12:00:00Z"
   }
 ]
@@ -866,6 +867,8 @@ Retrieve current runtime configuration for the customer.
 }
 ```
 
+**Note**: `llm_system_context` is not returned by customer-level runtime settings endpoints.
+
 ---
 
 ### Update Settings
@@ -895,6 +898,49 @@ Update runtime configuration (partial updates supported).
 
 **Note**: Changes to these settings may clear the optimization cache.
 Guard and telemetry thresholds take effect immediately for subsequent optimization requests.
+
+---
+
+## Admin Settings
+
+Admin users can read and update platform-level settings, including LLM system context.
+
+### Get Admin Settings
+
+**Endpoint**: `GET /api/admin/settings`
+
+**Authentication**: Required (admin role)
+
+**Response**:
+```json
+{
+  "telemetry_enabled": true,
+  "log_level": "INFO",
+  "llm_system_context": "You are an expert prompt compression engine..."
+}
+```
+
+### Update Admin Settings
+
+**Endpoint**: `PATCH /api/admin/settings`
+
+**Authentication**: Required (admin role)
+
+**Request Body** (all fields optional):
+```json
+{
+  "telemetry_enabled": true,
+  "log_level": "DEBUG",
+  "llm_system_context": "You are a precision-preserving compressor."
+}
+```
+
+**Response**: Returns updated admin settings.
+
+**Notes**:
+- `llm_system_context` is admin-only and managed through `/api/admin/settings` and the Admin Settings UI.
+- When updated, the backend syncs this value to `LLM compression context.txt`.
+- Runtime LLM optimization reads the admin DB value first, then falls back to file/default content when needed.
 
 ---
 
@@ -1044,7 +1090,7 @@ TIKTOKEN_CACHE_DIR=~/.tiktoken
 HF_HOME=/app/.cache/huggingface
 ```
 
-Telemetry collection is disabled by default. Toggle it via the Settings API (`PATCH /api/v1/settings` with `"telemetry_enabled"`) or the Admin Settings UI.
+Telemetry collection is disabled by default. Toggle it via the Settings API (`PATCH /api/v1/settings` with `"telemetry_enabled"`) or the Admin Settings UI. The setting is persisted in the database and survives backend restarts.
 
 ---
 
@@ -1091,4 +1137,4 @@ Telemetry collection is disabled by default. Toggle it via the Settings API (`PA
 
 ---
 
-**Last Updated**: 2026-01-22
+**Last Updated**: 2026-03-09

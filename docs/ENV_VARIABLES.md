@@ -310,7 +310,14 @@ The following variables are still supported and take precedence when explicitly 
 - **Default**: `true`
 - **Description**: Record every optimization request, result, and metadata in the database for analysis and audit trails.
 
-Telemetry collection for per-pass timing/token gains is disabled by default and is toggled at runtime using the Settings API (`PATCH /api/v1/settings`) or the Admin Settings UI (`telemetry_enabled`). No environment variable is required for this toggle.
+Telemetry collection for per-pass timing/token gains is disabled by default and is toggled at runtime using the Settings API (`PATCH /api/v1/settings`) or the Admin Settings UI (`telemetry_enabled`). No environment variable is required for this toggle. The selected value is persisted in runtime settings and survives backend restarts.
+
+### LLM System Context (Admin Runtime Setting)
+- **Type**: Runtime setting (not an environment variable)
+- **Default**: Loaded from `LLM compression context.txt` when no admin override exists
+- **Description**: Global system context used for LLM-based optimization prompts.
+- **Control Plane**: Admin-only via `PATCH /api/admin/settings` (`llm_system_context`) or the Admin Settings UI.
+- **Persistence**: Stored in the admin settings table and synchronized to `LLM compression context.txt` on update.
 
 Maximum-mode stage timing debug logs are now available when runtime `log_level` is set to `DEBUG` via Admin Settings (not an environment variable). No new env variable was introduced for this.
 
@@ -383,6 +390,6 @@ Maximum-mode stage timing debug logs are now available when runtime `log_level` 
 | `TIKTOKEN_CACHE_DIR` | ~/.tiktoken | Infrastructure |
 | `SECRET_KEY` | dev_secret_key_change_in_production | Security |
 
-> **Telemetry note**: Per-pass telemetry collection is disabled by default and is toggled via the Settings API (`"telemetry_enabled"`) or Admin UI. No environment variable is required.
+> **Telemetry note**: Per-pass telemetry collection is disabled by default and is toggled via the Settings API (`"telemetry_enabled"`) or Admin UI. No environment variable is required, and the toggle persists across restarts.
 
 > **Boolean Guidance**: Values `1`, `true`, `yes`, `on` are treated as `True`. Case-insensitive.

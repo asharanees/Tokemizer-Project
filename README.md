@@ -119,7 +119,7 @@ The `/admin` UI exposes every operational control:
 * **Refresh Workflows**: trigger global or per-model refreshes using `download_missing`, `force_redownload`, or `recovery` and monitor the running mode, targets, and missing models in real time.
 * **Air-Gap Readiness**: validate offline readiness to list missing/invalid models and manifest drift before transporting the cache.
 * **Canonical Mappings**: curate enterprise normalization pairs applied during optimization.
-* **System Settings**: configure SMTP/Stripe credentials, telemetry toggles, and other environment-facing options.
+* **System Settings**: configure SMTP/Stripe credentials, telemetry/logging toggles, and the admin-only LLM system context used by LLM-based optimization.
 
 Use the admin console to keep caches deterministic, repair downloads, and manage tenants without touching the database directly.
 

@@ -30,7 +30,7 @@ curl -X PATCH http://localhost:8000/api/v1/settings \
   -d '{"telemetry_enabled": false}'
 ```
 
-**Note:** These toggles take effect immediately for the running backend process. If the backend restarts, telemetry defaults back to disabled until it is re-enabled via the Settings API or UI.
+**Note:** These toggles take effect immediately and are persisted in runtime settings, so the current value is retained across backend restarts.
 
 ---
 
@@ -73,6 +73,7 @@ The following passes may be recorded in telemetry (depending on optimization mod
 | `lexical_transforms` | Synonym replacement, list compression, entity canonicalization | 10-50ms |
 | `deduplicate_content` | LSH/MinHash-based content deduplication | >50ms (if not short-circuited) |
 | `normalize_text` | Final text normalization and punctuation compression | <10ms |
+| `llm_based` | LLM provider optimization pass (single-pass telemetry record) | Provider/network dependent |
 
 **Note:** Not all passes are instrumented for telemetry. Passes without explicit telemetry recording contribute to overall optimization time but are not individually tracked.
 
