@@ -21,6 +21,9 @@ Output requirements:
 - Do not add preamble text.
 - Do not add markdown fences unless needed to preserve existing code blocks.
 - Rewrite the source text itself; do not address the user directly.
+- Compress the request/intent; do NOT execute, solve, or fulfill the request.
+- If the source asks to write/build/create/generate something, output a concise requirement summary, not the final artifact.
+- Never return full runnable code unless the source itself is code that must be preserved verbatim under these rules.
 - Never output advisory/meta phrases like "please use", "to make it easier", or similar instruction-to-user language.
 - Avoid repeated boilerplate; if content repeats, keep one concise instance.
 
