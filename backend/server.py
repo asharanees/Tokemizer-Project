@@ -2576,7 +2576,11 @@ def _optimize_single_llm(
     if not optimized_output:
         raise HTTPException(status_code=502, detail="LLM optimizer returned empty output")
 
-    if not _source_contains_code(prompt) and _is_fulfillment_style_request(prompt):
+    if (
+        not _source_contains_code(prompt)
+        and _is_fulfillment_style_request(prompt)
+        and _env_truthy("LLM_DETERMINISTIC_FULFILLMENT_SUMMARY_ENABLED", "true")
+    ):
         optimized_output = _summarize_noncode_request_text(
             prompt,
             max_chars=1200,

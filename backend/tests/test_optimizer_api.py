@@ -1658,3 +1658,67 @@ def test_validate_cached_model_availability_cache_invalidates_on_version_change(
     server._validate_cached_model_availability(("semantic_guard",))
 
     assert calls["count"] == 2
+
+
+def test_summarize_noncode_request_text_preserves_execution_plan_and_line_limit() -> None:
+    import server
+
+    prompt = (
+        "Write a Python data extraction script for Postgres at host=prod-db, port=5432. "
+        "Output CSV in exact header order user_id,email,signup_date,last_active,30d_retention_score. "
+        "Return both code and a short execution plan; response format must be a single code block. "
+        "Keep under 300 lines and fully featured."
+    )
+
+    summarized = server._summarize_noncode_request_text(
+        prompt,
+        max_chars=1200,
+        allow_long_output=True,
+    ).lower()
+
+    assert "execution plan" in summarized
+    assert "single code block" in summarized
+    assert "under 300 lines" in summarized
+    assert "host=prod-db" in summarized
+
+
+def test_deterministic_fulfillment_summary_feature_flag_controls_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import server
+
+    prompt = (
+        "Write a Python data extraction script for Postgres at host=prod-db, port=5432. "
+        "Return both code and a short execution plan. Keep under 300 lines."
+    )
+
+    request = OptimizationRequest(
+        prompt=prompt,
+        optimization_technique="llm_based",
+        optimization_mode="balanced",
+    )
+
+    monkeypatch.setenv("LLM_CONSTRAINT_ENFORCEMENT_ENABLED", "false")
+    monkeypatch.setenv("LLM_CONSTRAINT_REPAIR_ENABLED", "false")
+    monkeypatch.setattr(server, "get_llm_system_context", lambda: "compress")
+    monkeypatch.setattr(
+        server,
+        "call_llm",
+        lambda *_args, **_kwargs: type(
+            "LLMResultStub",
+            (),
+            {"text": "llm drafted output", "duration_ms": 5.0},
+        )(),
+    )
+
+    monkeypatch.setenv("LLM_DETERMINISTIC_FULFILLMENT_SUMMARY_ENABLED", "false")
+    result_disabled = server._optimize_single_llm(prompt, request)
+    assert result_disabled.optimized_output == "llm drafted output"
+
+    monkeypatch.setenv("LLM_DETERMINISTIC_FULFILLMENT_SUMMARY_ENABLED", "true")
+    result_enabled = server._optimize_single_llm(prompt, request)
+    lowered = result_enabled.optimized_output.lower()
+    assert "execution plan" in lowered
+    assert "under 300 lines" in lowered
+    assert "host=prod-db" in lowered
+    assert result_enabled.optimized_output != "llm drafted output"
