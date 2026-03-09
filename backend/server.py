@@ -2,6 +2,8 @@ import hashlib
 import json
 import logging
 import os
+import re
+import subprocess
 import struct
 import sys
 import threading
@@ -9,12 +11,17 @@ import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+try:
+    import fcntl  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - unavailable on non-POSIX platforms
+    fcntl = None  # type: ignore[assignment]
 
 from auth import get_current_customer, require_admin, track_usage
 from database import (
@@ -2056,9 +2063,114 @@ def _optimize_single(
     )
 
 
+def _extract_hard_constraint_tokens(prompt: str) -> List[str]:
+    max_tokens = _env_int(
+        "LLM_CONSTRAINT_MAX_TOKENS",
+        64,
+        minimum=0,
+        maximum=512,
+    )
+    if max_tokens <= 0:
+        return []
+
+    patterns = (
+        re.compile(r"\b[A-Z][A-Z0-9_]{2,}=[^\s,;|<>\"']+"),
+        re.compile(r"\bi-[0-9a-f]{17}\b", re.IGNORECASE),
+        re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
+    )
+
+    def _collect(text: str, acc: List[str], seen: set[str]) -> None:
+        for pattern in patterns:
+            for match in pattern.finditer(text):
+                token = match.group(0).strip()
+                if not token or token in seen:
+                    continue
+                seen.add(token)
+                acc.append(token)
+                if len(acc) >= max_tokens:
+                    return
+
+    lines = prompt.splitlines()
+    constraint_lines: List[str] = []
+    include_window = 0
+    for line in lines:
+        lowered = line.lower()
+        if any(
+            marker in lowered
+            for marker in (
+                "hard constraint",
+                "constraints:",
+                "required values",
+                "must preserve",
+                "must appear verbatim",
+            )
+        ):
+            include_window = 8
+            constraint_lines.append(line)
+            continue
+        if include_window > 0:
+            include_window -= 1
+            constraint_lines.append(line)
+
+    ordered_tokens: List[str] = []
+    seen_tokens: set[str] = set()
+    if constraint_lines:
+        _collect("\n".join(constraint_lines), ordered_tokens, seen_tokens)
+    if len(ordered_tokens) < max_tokens:
+        _collect(prompt, ordered_tokens, seen_tokens)
+
+    return ordered_tokens[:max_tokens]
+
+
+def _apply_constraint_enforcement(
+    prompt: str,
+    optimized_output: str,
+) -> Tuple[str, Dict[str, int]]:
+    if not _env_truthy("LLM_CONSTRAINT_ENFORCEMENT_ENABLED", "true"):
+        return optimized_output, {
+            "detected": 0,
+            "missing_before": 0,
+            "appended": 0,
+            "missing_after": 0,
+        }
+
+    constraints = _extract_hard_constraint_tokens(prompt)
+    if not constraints:
+        return optimized_output, {
+            "detected": 0,
+            "missing_before": 0,
+            "appended": 0,
+            "missing_after": 0,
+        }
+
+    missing_before = [token for token in constraints if token not in optimized_output]
+    if missing_before:
+        suffix = "\n\nCONSTRAINTS: " + " | ".join(missing_before)
+        optimized_output = (optimized_output.rstrip() + suffix).strip()
+
+    missing_after = [token for token in constraints if token not in optimized_output]
+    if missing_after and _env_truthy("LLM_STRICT_CONSTRAINT_FAILURE", "true"):
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Constraint enforcement failed for LLM output; missing: "
+                + ", ".join(missing_after[:8])
+            ),
+        )
+
+    return optimized_output, {
+        "detected": len(constraints),
+        "missing_before": len(missing_before),
+        "appended": len(missing_before),
+        "missing_after": len(missing_after),
+    }
+
+
 def _optimize_single_llm(
     prompt: str,
     request: OptimizationRequest,
+    *,
+    job_id: Optional[str] = None,
 ) -> OptimizationResponse:
     started_at = time.perf_counter()
 
@@ -2074,7 +2186,7 @@ def _optimize_single_llm(
 
     max_input_chars = _env_int(
         "LLM_OPTIMIZER_MAX_INPUT_CHARS",
-        120000,
+        4000,
         minimum=2000,
         maximum=1000000,
     )
@@ -2092,14 +2204,6 @@ def _optimize_single_llm(
     )
 
     prompt_char_len = len(prompt)
-    if prompt_char_len > max_input_chars:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Prompt too large for LLM async optimization ({prompt_char_len} chars > "
-                f"limit {max_input_chars})."
-            ),
-        )
 
     prompt_token_estimate = optimizer.count_tokens(prompt)
     if prompt_token_estimate > max_input_tokens:
@@ -2111,26 +2215,54 @@ def _optimize_single_llm(
             ),
         )
 
-    user_prompt_parts: List[str] = [
-        f"Optimization mode: {request.optimization_mode}",
-        "Input:",
-        prompt,
-    ]
-    if request.query:
-        user_prompt_parts.insert(1, f"Query hint: {request.query}")
-    user_prompt = "\n\n".join(part for part in user_prompt_parts if part)
+    def _chunk_prompt(value: str, chunk_size: int) -> List[str]:
+        if len(value) <= chunk_size:
+            return [value]
+        chunks: List[str] = []
+        cursor = 0
+        while cursor < len(value):
+            upper = min(len(value), cursor + chunk_size)
+            if upper < len(value):
+                split = value.rfind("\n", cursor, upper)
+                if split <= cursor:
+                    split = value.rfind(" ", cursor, upper)
+                if split > cursor:
+                    upper = split
+            segment = value[cursor:upper].strip()
+            if segment:
+                chunks.append(segment)
+            cursor = upper
+        return chunks or [value]
 
-    system_context = get_llm_system_context()
-    composed_prompt = f"System Context:\n{system_context}\n\nUser Prompt:\n{user_prompt}"
-    composed_token_estimate = optimizer.count_tokens(composed_prompt)
-    if composed_token_estimate > max_composed_tokens:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Composed LLM request is too large (~{composed_token_estimate} tokens > "
-                f"limit {max_composed_tokens})."
-            ),
+    chunks = _chunk_prompt(prompt, max_input_chars)
+    timeout_fast = _env_int("FAST_JOB_TIMEOUT", 180, minimum=30, maximum=900)
+    timeout_heavy = _env_int("HEAVY_JOB_TIMEOUT", 300, minimum=60, maximum=1800)
+    inference_timeout_seconds = timeout_heavy if len(chunks) > 1 else timeout_fast
+
+    if len(chunks) > 1:
+        logger.info(
+            "LLM input chunked sequentially job_id=%s chunks=%s max_input_chars=%s",
+            job_id or "n/a",
+            len(chunks),
+            max_input_chars,
         )
+
+    def _call_llm_with_timeout(composed_prompt: str) -> LLMResult:
+        with ThreadPoolExecutor(max_workers=1) as timeout_executor:
+            future = timeout_executor.submit(
+                call_llm,
+                provider,
+                model,
+                composed_prompt,
+                api_key,
+            )
+            try:
+                return future.result(timeout=inference_timeout_seconds)
+            except FuturesTimeoutError as exc:
+                _kill_active_ollama_runners_on_timeout()
+                raise TimeoutError(
+                    f"LLM inference exceeded timeout ({inference_timeout_seconds}s)"
+                ) from exc
 
     with tracing_service.start_span(
         "llm.optimize.single",
@@ -2140,30 +2272,107 @@ def _optimize_single_llm(
             "llm.model": model,
             "prompt.input_chars": len(prompt),
             "prompt.input_tokens_estimate": prompt_token_estimate,
-            "prompt.composed_tokens_estimate": composed_token_estimate,
+            "prompt.chunk_count": len(chunks),
         },
     ):
         try:
-            with tracing_service.start_span(
-                "llm.call",
-                kind=tracing_service.SpanKind.CLIENT,
-                attributes={
-                    "llm.provider": provider,
-                    "llm.model": model,
-                },
-            ):
-                llm_result = call_llm(provider, model, composed_prompt, api_key)
+            llm_outputs: List[str] = []
+            total_inference_ms = 0.0
+            system_context = get_llm_system_context()
+            inference_started_at = time.perf_counter()
+
+            logger.info(
+                "llm_worker_event=inference_started job_id=%s chunks=%s timeout_seconds=%s",
+                job_id or "n/a",
+                len(chunks),
+                inference_timeout_seconds,
+            )
+
+            with _llm_inference_lock:
+                with _HostInferenceFileLock(_llm_host_lock_path):
+                    for index, chunk_prompt in enumerate(chunks, start=1):
+                        user_prompt_parts: List[str] = [
+                            f"Optimization mode: {request.optimization_mode}",
+                            "Input:",
+                            chunk_prompt,
+                        ]
+                        if request.query:
+                            user_prompt_parts.insert(1, f"Query hint: {request.query}")
+                        if len(chunks) > 1:
+                            user_prompt_parts.insert(
+                                1,
+                                f"Chunk: {index}/{len(chunks)} (process sequentially and return optimized chunk only)",
+                            )
+                        user_prompt = "\n\n".join(part for part in user_prompt_parts if part)
+
+                        composed_prompt = (
+                            f"System Context:\n{system_context}\n\nUser Prompt:\n{user_prompt}"
+                        )
+                        composed_token_estimate = optimizer.count_tokens(composed_prompt)
+                        if composed_token_estimate > max_composed_tokens:
+                            raise HTTPException(
+                                status_code=400,
+                                detail=(
+                                    f"Composed LLM request is too large (~{composed_token_estimate} tokens > "
+                                    f"limit {max_composed_tokens})."
+                                ),
+                            )
+
+                        with tracing_service.start_span(
+                            "llm.call",
+                            kind=tracing_service.SpanKind.CLIENT,
+                            attributes={
+                                "llm.provider": provider,
+                                "llm.model": model,
+                                "prompt.chunk_index": index,
+                                "prompt.chunk_count": len(chunks),
+                                "prompt.composed_tokens_estimate": composed_token_estimate,
+                            },
+                        ):
+                            llm_result = _call_llm_with_timeout(composed_prompt)
+
+                        llm_outputs.append((llm_result.text or "").strip())
+                        total_inference_ms += float(llm_result.duration_ms)
+
+                        elapsed = time.perf_counter() - inference_started_at
+                        if elapsed > float(inference_timeout_seconds):
+                            _kill_active_ollama_runners_on_timeout()
+                            raise TimeoutError(
+                                f"LLM inference exceeded timeout ({inference_timeout_seconds}s)"
+                            )
+
+            logger.info(
+                "llm_worker_event=inference_completed job_id=%s chunks=%s inference_duration=%.3f",
+                job_id or "n/a",
+                len(chunks),
+                total_inference_ms / 1000.0,
+            )
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
+        except TimeoutError as error:
+            raise HTTPException(status_code=504, detail=str(error)) from error
         except LLMProviderError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
 
-    optimized_output = (llm_result.text or "").strip()
+    optimized_output = "\n\n".join(piece for piece in llm_outputs if piece).strip()
     if not optimized_output:
         raise HTTPException(status_code=502, detail="LLM optimizer returned empty output")
 
+    optimized_output, constraint_metrics = _apply_constraint_enforcement(
+        prompt,
+        optimized_output,
+    )
+    logger.info(
+        "llm_worker_event=constraint_enforcement job_id=%s detected=%s missing_before=%s appended=%s missing_after=%s",
+        job_id or "n/a",
+        constraint_metrics["detected"],
+        constraint_metrics["missing_before"],
+        constraint_metrics["appended"],
+        constraint_metrics["missing_after"],
+    )
+
     processing_time_ms = max(
-        llm_result.duration_ms,
+        total_inference_ms,
         (time.perf_counter() - started_at) * 1000.0,
     )
     original_chars = len(prompt)
@@ -2995,6 +3204,13 @@ _llm_async_worker_lock = threading.Lock()
 _llm_async_worker_stop = threading.Event()
 _ollama_keepalive_thread: Optional[threading.Thread] = None
 _ollama_keepalive_lock = threading.Lock()
+_llm_inference_lock = threading.Lock()
+_llm_worker_state_lock = threading.Lock()
+_llm_worker_state: Dict[str, Any] = {
+    "active_job_id": None,
+    "started_at_monotonic": 0.0,
+}
+_llm_host_lock_path = "/tmp/tokemizer-ollama-inference.lock"
 
 
 def _llm_async_enabled() -> bool:
@@ -3071,7 +3287,21 @@ def _enqueue_llm_optimization_job(
         client.send_message(**send_kwargs)
 
 
-def _process_llm_optimization_job(job_id: str) -> None:
+def _mark_llm_job_failed(job_id: str, error_message: str) -> bool:
+    try:
+        update_llm_optimization_job(
+            job_id,
+            status="failed",
+            error_message=error_message,
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return True
+    except Exception:
+        logger.exception("Failed to mark async LLM job as failed job_id=%s", job_id)
+        return False
+
+
+def _process_llm_optimization_job(job_id: str) -> bool:
     with tracing_service.start_span(
         "llm.job.process",
         kind=tracing_service.SpanKind.INTERNAL,
@@ -3079,19 +3309,46 @@ def _process_llm_optimization_job(job_id: str) -> None:
     ):
         job = get_llm_optimization_job(job_id)
         if not job:
-            return
+            logger.warning("Async LLM job message had unknown job_id=%s", job_id)
+            return True
         if job.status in {"completed", "failed"}:
-            return
+            return True
 
         attempts = int(job.attempts or 0) + 1
+        queue_wait_time = 0.0
+        try:
+            created_at_dt = datetime.fromisoformat(str(job.created_at))
+            queue_wait_time = max(
+                0.0,
+                (datetime.now(timezone.utc) - created_at_dt).total_seconds(),
+            )
+        except Exception:
+            queue_wait_time = 0.0
+
+        logger.info(
+            "llm_worker_event=job_received job_id=%s attempts=%s queue_wait_time=%.3f",
+            job_id,
+            attempts,
+            queue_wait_time,
+        )
+
+        _cleanup_stale_ollama_runners()
+        _mark_worker_active_job(job_id)
+
         update_llm_optimization_job(
             job_id,
             status="processing",
             attempts=attempts,
             error_message="",
         )
+        logger.info(
+            "llm_worker_event=job_started job_id=%s queue_wait_time=%.3f",
+            job_id,
+            queue_wait_time,
+        )
 
         try:
+            job_started = time.perf_counter()
             payload = dict(job.request_payload)
             request = OptimizationRequest(**payload)
             if not request.prompt:
@@ -3099,21 +3356,162 @@ def _process_llm_optimization_job(job_id: str) -> None:
             if request.optimization_technique != "llm_based":
                 raise ValueError("Async queue supports only llm_based optimization")
 
-            result = _optimize_single_llm(request.prompt, request)
+            result = _optimize_single_llm(request.prompt, request, job_id=job_id)
+            total_latency = max(0.0, time.perf_counter() - job_started)
             update_llm_optimization_job(
                 job_id,
                 status="completed",
                 result_payload=result.model_dump(),
                 completed_at=datetime.now(timezone.utc).isoformat(),
             )
+            logger.info(
+                "llm_worker_event=job_completed job_id=%s queue_wait_time=%.3f inference_duration=%.3f total_latency=%.3f",
+                job_id,
+                queue_wait_time,
+                float(result.stats.processing_time_ms) / 1000.0,
+                total_latency,
+            )
+            return True
+        except HTTPException as exc:
+            detail = str(exc.detail) if getattr(exc, "detail", None) else str(exc)
+            if int(getattr(exc, "status_code", 500) or 500) == 504:
+                logger.error("LLM async job timed out job_id=%s reason=%s", job_id, detail)
+            else:
+                logger.exception("Async LLM job %s failed with HTTPException", job_id)
+            return _mark_llm_job_failed(job_id, detail)
+        except TimeoutError as exc:
+            logger.error("LLM async job timed out job_id=%s reason=%s", job_id, str(exc))
+            return _mark_llm_job_failed(job_id, str(exc))
         except Exception as exc:
             logger.exception("Async LLM job %s failed", job_id)
-            update_llm_optimization_job(
-                job_id,
-                status="failed",
-                error_message=str(exc),
-                completed_at=datetime.now(timezone.utc).isoformat(),
+            return _mark_llm_job_failed(job_id, str(exc))
+        finally:
+            _release_worker_active_job(job_id)
+
+    return False
+
+
+def _mark_worker_active_job(job_id: str) -> None:
+    with _llm_worker_state_lock:
+        _llm_worker_state["active_job_id"] = job_id
+        _llm_worker_state["started_at_monotonic"] = time.monotonic()
+
+
+def _release_worker_active_job(job_id: Optional[str] = None) -> None:
+    with _llm_worker_state_lock:
+        active_job_id = _llm_worker_state.get("active_job_id")
+        if job_id and active_job_id and active_job_id != job_id:
+            return
+        _llm_worker_state["active_job_id"] = None
+        _llm_worker_state["started_at_monotonic"] = 0.0
+
+
+def _release_stale_worker_state(*, max_processing_seconds: int) -> None:
+    with _llm_worker_state_lock:
+        active_job_id = _llm_worker_state.get("active_job_id")
+        started = float(_llm_worker_state.get("started_at_monotonic") or 0.0)
+        if not active_job_id or started <= 0:
+            return
+        elapsed = max(0.0, time.monotonic() - started)
+        if elapsed < float(max_processing_seconds):
+            return
+        logger.warning(
+            "LLM worker state released after stale processing timeout job_id=%s elapsed=%.3f",
+            active_job_id,
+            elapsed,
+        )
+        _llm_worker_state["active_job_id"] = None
+        _llm_worker_state["started_at_monotonic"] = 0.0
+
+
+class _HostInferenceFileLock:
+    def __init__(self, lock_path: str) -> None:
+        self._lock_path = lock_path
+        self._handle = None
+
+    def __enter__(self) -> "_HostInferenceFileLock":
+        if fcntl is None:
+            return self
+        handle = open(self._lock_path, "a+", encoding="utf-8")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        self._handle = handle
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._handle is None or fcntl is None:
+            return
+        try:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._handle.close()
+            self._handle = None
+
+
+def _cleanup_stale_ollama_runners() -> None:
+    stale_seconds = _env_int(
+        "LLM_OLLAMA_ORPHAN_SECONDS",
+        300,
+        minimum=60,
+        maximum=7200,
+    )
+    try:
+        result = subprocess.run(
+            ["/bin/sh", "-lc", "ps -eo pid=,etimes=,args="],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if result.returncode != 0 or not result.stdout:
+            return
+
+        for raw_line in result.stdout.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            parts = line.split(maxsplit=2)
+            if len(parts) != 3:
+                continue
+            pid_text, elapsed_text, args = parts
+            if "ollama runner" not in args:
+                continue
+            if "ollama serve" in args:
+                continue
+            try:
+                pid = int(pid_text)
+                elapsed_seconds = int(elapsed_text)
+            except ValueError:
+                continue
+            if elapsed_seconds < stale_seconds:
+                continue
+            subprocess.run(
+                ["/bin/kill", "-9", str(pid)],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
             )
+            logger.warning(
+                "Killed stale/orphan ollama runner pid=%s elapsed_seconds=%s",
+                pid,
+                elapsed_seconds,
+            )
+    except Exception:
+        logger.exception("Failed to clean stale/orphan ollama runner processes")
+
+
+def _kill_active_ollama_runners_on_timeout() -> None:
+    try:
+        subprocess.run(
+            ["/bin/sh", "-lc", "pkill -9 -f 'ollama runner' || true"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        logger.error("Killed active ollama runner processes after timeout")
+    except Exception:
+        logger.exception("Failed to kill active ollama runners after timeout")
 
 
 def _reap_stale_llm_jobs_if_needed(*, force: bool = False) -> None:
@@ -3132,6 +3530,9 @@ def _reap_stale_llm_jobs_if_needed(*, force: bool = False) -> None:
         minimum=300,
         maximum=604800,
     )
+    heavy_timeout_seconds = _env_int("HEAVY_JOB_TIMEOUT", 300, minimum=60, maximum=1800)
+    safe_processing_floor = max(600, heavy_timeout_seconds * 3)
+    processing_seconds = max(processing_seconds, safe_processing_floor)
 
     if processing_seconds <= 0 and queued_seconds <= 0:
         return
@@ -3159,6 +3560,8 @@ def _reap_stale_llm_jobs_if_needed(*, force: bool = False) -> None:
         ),
     )
     total = int(reaped.get("total_reaped") or 0)
+    if int(reaped.get("processing_reaped") or 0) > 0:
+        _release_stale_worker_state(max_processing_seconds=processing_seconds)
     if total > 0 or force:
         logger.info(
             "LLM stale-job reaper: processing=%s queued=%s total=%s",
@@ -3180,6 +3583,7 @@ def _process_llm_queue_message(*, client: Any, queue_url: str, message: Dict[str
                 job_id = candidate.strip()
     except Exception:
         job_id = None
+    should_delete = False
 
     try:
         if job_id:
@@ -3199,17 +3603,23 @@ def _process_llm_queue_message(*, client: Any, queue_url: str, message: Dict[str
                         "job.id": job_id,
                     },
                 ):
-                    _process_llm_optimization_job(job_id)
+                    should_delete = _process_llm_optimization_job(job_id)
             finally:
                 tracing_service.detach_context(token)
         else:
             logger.warning("Received invalid LLM async queue payload: %s", body_raw)
+            should_delete = True
     finally:
-        if receipt_handle:
+        if receipt_handle and should_delete:
             try:
                 client.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
             except Exception:
                 logger.exception("Failed to delete SQS message for job=%s", job_id)
+        elif receipt_handle and not should_delete:
+            logger.warning(
+                "Preserving SQS message for retry because job did not reach terminal state job_id=%s",
+                job_id,
+            )
 
 
 def _llm_async_worker_loop() -> None:
@@ -3235,18 +3645,25 @@ def _llm_async_worker_loop() -> None:
     except (TypeError, ValueError):
         visibility_timeout = 120
 
-    worker_concurrency = _env_int(
+    configured_worker_concurrency = _env_int(
         "LLM_OPTIMIZE_WORKER_CONCURRENCY",
         1,
         minimum=1,
         maximum=8,
     )
+    worker_concurrency = 1
     reaper_interval_seconds = _env_int(
         "LLM_OPTIMIZE_REAPER_INTERVAL_SECONDS",
         60,
         minimum=10,
         maximum=600,
     )
+
+    if configured_worker_concurrency != 1:
+        logger.warning(
+            "LLM_OPTIMIZE_WORKER_CONCURRENCY=%s overridden to 1 to enforce single active inference per host",
+            configured_worker_concurrency,
+        )
 
     logger.info(
         "LLM async worker started (queue=%s, concurrency=%s)",
@@ -3257,50 +3674,32 @@ def _llm_async_worker_loop() -> None:
     _reap_stale_llm_jobs_if_needed(force=True)
     last_reaper_run = time.monotonic()
 
-    with ThreadPoolExecutor(max_workers=worker_concurrency) as worker_pool:
-        in_flight: List[Any] = []
-        while not _llm_async_worker_stop.is_set():
-            try:
-                now_monotonic = time.monotonic()
-                if now_monotonic - last_reaper_run >= reaper_interval_seconds:
-                    _reap_stale_llm_jobs_if_needed()
-                    last_reaper_run = now_monotonic
+    while not _llm_async_worker_stop.is_set():
+        try:
+            now_monotonic = time.monotonic()
+            if now_monotonic - last_reaper_run >= reaper_interval_seconds:
+                _reap_stale_llm_jobs_if_needed()
+                last_reaper_run = now_monotonic
 
-                in_flight = [future for future in in_flight if not future.done()]
-                available_slots = worker_concurrency - len(in_flight)
-                if available_slots <= 0:
-                    time.sleep(0.1)
-                    continue
+            response = client.receive_message(
+                QueueUrl=queue_url,
+                MaxNumberOfMessages=1,
+                WaitTimeSeconds=wait_seconds,
+                VisibilityTimeout=visibility_timeout,
+                MessageAttributeNames=["All"],
+            )
+            messages = response.get("Messages", [])
+            if not messages:
+                continue
 
-                response = client.receive_message(
-                    QueueUrl=queue_url,
-                    MaxNumberOfMessages=min(10, available_slots),
-                    WaitTimeSeconds=wait_seconds,
-                    VisibilityTimeout=visibility_timeout,
-                    MessageAttributeNames=["All"],
-                )
-                messages = response.get("Messages", [])
-                if not messages:
-                    continue
-
-                for message in messages:
-                    in_flight.append(
-                        worker_pool.submit(
-                            _process_llm_queue_message,
-                            client=client,
-                            queue_url=queue_url,
-                            message=message,
-                        )
-                    )
-            except Exception:
-                logger.exception("LLM async worker loop error")
-                time.sleep(1.0)
-
-        for future in in_flight:
-            try:
-                future.result(timeout=5)
-            except Exception:
-                logger.exception("LLM async worker task failed during shutdown")
+            _process_llm_queue_message(
+                client=client,
+                queue_url=queue_url,
+                message=messages[0],
+            )
+        except Exception:
+            logger.exception("LLM async worker loop error")
+            time.sleep(1.0)
 
     logger.info("LLM async worker stopped")
 

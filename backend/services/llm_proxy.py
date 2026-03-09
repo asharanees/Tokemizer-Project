@@ -44,18 +44,34 @@ def _resolve_ollama_retry_count() -> int:
 
 def _resolve_ollama_keep_alive() -> str | None:
     raw_value = os.getenv("LLM_OLLAMA_KEEP_ALIVE", "30m").strip()
-    if not raw_value:
-        return None
-    return raw_value
+    return raw_value or "30m"
 
 
 def _resolve_ollama_num_predict() -> int:
-    raw_value = os.getenv("LLM_OLLAMA_NUM_PREDICT", "256").strip()
+    raw_value = os.getenv("LLM_OLLAMA_NUM_PREDICT", "80").strip()
     try:
         parsed = int(raw_value)
     except (TypeError, ValueError):
-        return 256
-    return max(64, min(parsed, 1024))
+        return 80
+    return max(16, min(parsed, 80))
+
+
+def _resolve_ollama_temperature() -> float:
+    raw_value = os.getenv("LLM_OLLAMA_TEMPERATURE", "0.2").strip()
+    try:
+        parsed = float(raw_value)
+    except (TypeError, ValueError):
+        return 0.2
+    return max(0.0, min(parsed, 0.2))
+
+
+def _resolve_ollama_top_p() -> float:
+    raw_value = os.getenv("LLM_OLLAMA_TOP_P", "0.9").strip()
+    try:
+        parsed = float(raw_value)
+    except (TypeError, ValueError):
+        return 0.9
+    return max(0.1, min(parsed, 0.9))
 
 
 @dataclass
@@ -354,6 +370,8 @@ def _call_ollama(model: str, prompt: str, api_key: str) -> LLMResult:
     max_attempts = _resolve_ollama_retry_count()
     keep_alive = _resolve_ollama_keep_alive()
     num_predict = _resolve_ollama_num_predict()
+    temperature = _resolve_ollama_temperature()
+    top_p = _resolve_ollama_top_p()
 
     last_error: LLMProviderError | None = None
     for attempt in range(1, max_attempts + 1):
@@ -365,7 +383,11 @@ def _call_ollama(model: str, prompt: str, api_key: str) -> LLMResult:
                     "model": model,
                     "messages": [{"role": "user", "content": prompt}],
                     "stream": False,
-                    "options": {"num_predict": num_predict},
+                    "options": {
+                        "num_predict": num_predict,
+                        "temperature": temperature,
+                        "top_p": top_p,
+                    },
                     **({"keep_alive": keep_alive} if keep_alive else {}),
                 },
                 timeout_seconds=timeout_seconds,
