@@ -2166,6 +2166,23 @@ def _apply_constraint_enforcement(
     }
 
 
+def _is_low_quality_llm_rewrite(text: str) -> bool:
+    candidate = (text or "").strip().lower()
+    if not candidate:
+        return True
+    suspicious_patterns = (
+        "to make it easier",
+        "please use",
+        "step-by-step guide",
+        "use the exact wording",
+    )
+    if any(pattern in candidate for pattern in suspicious_patterns):
+        return True
+    if candidate.count("please") >= 3:
+        return True
+    return False
+
+
 def _optimize_single_llm(
     prompt: str,
     request: OptimizationRequest,
@@ -2291,22 +2308,25 @@ def _optimize_single_llm(
             with _llm_inference_lock:
                 with _HostInferenceFileLock(_llm_host_lock_path):
                     for index, chunk_prompt in enumerate(chunks, start=1):
-                        user_prompt_parts: List[str] = [
-                            f"Optimization mode: {request.optimization_mode}",
-                            "Input:",
-                            chunk_prompt,
-                        ]
-                        if request.query:
-                            user_prompt_parts.insert(1, f"Query hint: {request.query}")
-                        if len(chunks) > 1:
-                            user_prompt_parts.insert(
-                                1,
-                                f"Chunk: {index}/{len(chunks)} (process sequentially and return optimized chunk only)",
-                            )
-                        user_prompt = "\n\n".join(part for part in user_prompt_parts if part)
-
+                        query_hint = request.query.strip() if request.query else "none"
+                        chunk_meta = (
+                            f"{index}/{len(chunks)} (sequential chunk processing)"
+                            if len(chunks) > 1
+                            else "1/1"
+                        )
                         composed_prompt = (
-                            f"System Context:\n{system_context}\n\nUser Prompt:\n{user_prompt}"
+                            f"{system_context}\n\n"
+                            "TASK:\n"
+                            "Rewrite SOURCE_TEXT into a concise, high-signal compressed version.\n"
+                            "Return only rewritten content.\n"
+                            "Do not address the user or provide advice/instructions about writing style.\n"
+                            "Do not output meta-commentary, process notes, or repeated boilerplate.\n\n"
+                            f"OPTIMIZATION_MODE: {request.optimization_mode}\n"
+                            f"QUERY_HINT: {query_hint}\n"
+                            f"CHUNK: {chunk_meta}\n\n"
+                            "SOURCE_TEXT_BEGIN\n"
+                            f"{chunk_prompt}\n"
+                            "SOURCE_TEXT_END\n"
                         )
                         composed_token_estimate = optimizer.count_tokens(composed_prompt)
                         if composed_token_estimate > max_composed_tokens:
@@ -2331,7 +2351,31 @@ def _optimize_single_llm(
                         ):
                             llm_result = _call_llm_with_timeout(composed_prompt)
 
-                        llm_outputs.append((llm_result.text or "").strip())
+                        llm_text = (llm_result.text or "").strip()
+                        if _is_low_quality_llm_rewrite(llm_text):
+                            retry_prompt = (
+                                f"{composed_prompt}\n"
+                                "\nVALIDATION_FEEDBACK:\n"
+                                "The prior draft was invalid because it used advisory/meta language.\n"
+                                "Rewrite SOURCE_TEXT directly as concise final content only.\n"
+                            )
+                            retry_token_estimate = optimizer.count_tokens(retry_prompt)
+                            if retry_token_estimate <= max_composed_tokens:
+                                with tracing_service.start_span(
+                                    "llm.call.retry",
+                                    kind=tracing_service.SpanKind.CLIENT,
+                                    attributes={
+                                        "llm.provider": provider,
+                                        "llm.model": model,
+                                        "prompt.chunk_index": index,
+                                        "prompt.chunk_count": len(chunks),
+                                        "prompt.composed_tokens_estimate": retry_token_estimate,
+                                    },
+                                ):
+                                    llm_result = _call_llm_with_timeout(retry_prompt)
+                                    llm_text = (llm_result.text or "").strip()
+
+                        llm_outputs.append(llm_text)
                         total_inference_ms += float(llm_result.duration_ms)
 
                         elapsed = time.perf_counter() - inference_started_at

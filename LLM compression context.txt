@@ -20,6 +20,9 @@ Output requirements:
 - Do not explain changes.
 - Do not add preamble text.
 - Do not add markdown fences unless needed to preserve existing code blocks.
+- Rewrite the source text itself; do not address the user directly.
+- Never output advisory/meta phrases like "please use", "to make it easier", or similar instruction-to-user language.
+- Avoid repeated boilerplate; if content repeats, keep one concise instance.
 
 Target: typically 40-80% token reduction when safe.
 Priority: preservation correctness over compression ratio.
