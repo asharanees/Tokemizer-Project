@@ -2291,21 +2291,37 @@ def _summarize_request_text(text: str, max_chars: int = 700) -> str:
 def _summarize_noncode_request_text(text: str, max_chars: int = 280) -> str:
     candidate = (text or "")
     candidate = re.sub(r"```.*?```", " ", candidate, flags=re.DOTALL)
-    candidate = re.sub(r"`[^`]+`", " ", candidate)
-    candidate = re.sub(r"\b[a-zA-Z_][\w]*\s*=\s*[^\n,;]{1,180}", " ", candidate)
-    candidate = re.sub(
-        r"\b(import|from|def|class|return|try|except|raise|print|psycopg2|sqlalchemy|cursor|connect)\b[^\n.]{0,220}",
-        " ",
-        candidate,
-        flags=re.IGNORECASE,
+    candidate = re.sub(r"`([^`]+)`", r"\1", candidate)
+    normalized = re.sub(r"\s+", " ", candidate).strip()
+    if not normalized:
+        return "Concise requirement summary requested."
+
+    clauses = [
+        piece.strip(" -;,")
+        for piece in re.split(r"(?<=[.!?;])\s+", normalized)
+        if piece.strip()
+    ]
+    if not clauses:
+        clauses = [normalized]
+
+    priority_pattern = re.compile(
+        r"(constraint|must|include|preserve|exact|verbatim|order|header|field|format|output|python|postgres|host|port|csv|retry|backoff|mask|domain|stream|memory|unit test|docstring|type hint|security)",
+        re.IGNORECASE,
     )
-    candidate = re.sub(r"\s+", " ", candidate).strip()
-    if not candidate or _has_programming_artifacts(candidate):
-        candidate = (
-            "Concise requirement summary requested. Preserve intent and constraints "
-            "without generating code."
+    prioritized = [clause for clause in clauses if priority_pattern.search(clause)]
+    merged = " ".join(prioritized if prioritized else clauses)
+
+    if _has_programming_artifacts(merged):
+        reduced = re.sub(
+            r"\b(import|from|def|class|return|try|except|raise|print)\b",
+            "",
+            merged,
+            flags=re.IGNORECASE,
         )
-    return _summarize_request_text(candidate, max_chars=max_chars)
+        reduced = re.sub(r"\s+", " ", reduced).strip(" -;,")
+        merged = reduced if reduced else normalized
+
+    return _summarize_request_text(merged, max_chars=max_chars)
 
 
 def _optimize_single_llm(
